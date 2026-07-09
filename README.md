@@ -1,12 +1,13 @@
-# Sec-LLM-Local 安全大语言模型平台
+# Sec-LLM 4.0 — AI Agent 网络安全平台
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python">
   <img src="https://img.shields.io/badge/FastAPI-0.128.0-009688.svg" alt="FastAPI">
+  <img src="https://img.shields.io/badge/LangGraph-1.2-cyan.svg" alt="LangGraph">
   <img src="https://img.shields.io/badge/Next.js-14-black.svg" alt="Next.js">
   <img src="https://img.shields.io/badge/TypeScript-5.0-3178C6.svg" alt="TypeScript">
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
-  <img src="https://img.shields.io/github/stars/yusichen396/Sec-LLM-3.0?style=social" alt="GitHub stars">
+  <img src="https://img.shields.io/badge/Tests-42+-green.svg" alt="Tests">
 </p>
 
 <p align="center">
@@ -14,93 +15,144 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/yusichen396/Sec-LLM-3.0">GitHub 仓库</a> •
+  <a href="#-核心能力">核心能力</a> •
   <a href="#-快速开始">快速开始</a> •
-  <a href="#-功能特性">功能特性</a> •
-  <a href="#openclaw-skill-集成">OpenClaw Skill</a>
+  <a href="#-项目架构">项目架构</a> •
+  <a href="#-api-文档">API 文档</a> •
+  <a href="#-cli--tui">CLI / TUI</a>
 </p>
 
-一个面向网络安全场景的本地/云端 LLM 平台，集成 RAG 知识库、日志分析、威胁情报联网富化、流式对话与仪表盘统计，支持本地 Ollama 与 DeepSeek 云端模型切换。
+---
 
-> 🔐 **Sec-LLM** - 由灵犀网卫开发的网络安全专用大模型
+**Sec-LLM 4.0** 是一个面向网络安全的 **AI Agent 平台**——不是聊天机器人，而是能够**自主调用工具、编排多 Agent 协作、执行实际安全测试并生成可验证 PoC**的智能体系统。
+
+基于 LangGraph 构建 Agent 状态图，集成 Playwright 浏览器自动化、Docker 沙箱命令执行、威胁情报富化、代码审计等 **10 个 Agent 工具**，支持 **local (Ollama) / cloud (DeepSeek) 双引擎实时切换**。
+
+> 从 v3.1 聊天机器人/RAG 平台全面升级。新增 Agent 引擎、多 Agent 编排、工具注册表、CLI/TUI、Agent Web 控制台。
 
 ---
 
-## ✨ 功能特性
+## ✨ 核心能力
 
-- 🤖 **安全领域专用**：严格限制非安全话题，中文优先回答
-- 🔁 **引擎实时切换**：网页一键切换本地 Ollama / 云端 DeepSeek（用户级独立选择）
-- 📚 **知识库学习**：PDF/TXT 上传入库，检索增强问答
-- 🔍 **智能日志分析**：威胁等级、攻击类型、源 IP 自动提取
-- 🛰️ **威胁情报自动化研判**：IOC 自动识别（IP/域名/MD5/SHA256）+ 多源情报富化 + AI 研判报告
-- 🧰 **安全工具箱（独立页面化）**：钓鱼邮件鉴定、源码审计、蓝队规则生成、扫描报告解析
-- 📊 **真实仪表盘**：基于 MySQL 统计日志与风险指标
-- 🧪 **流式对话**：后端流式输出，前端打字机效果
-- 🔐 **用户认证**：JWT 认证 + bcrypt 密码加密 + 邮箱验证激活
-- 👤 **用户数据隔离**：日志记录、知识库文件、统计数据按用户隔离
-- 🧹 **临时文件清理**：`temp/` 目录定期清理（默认 24h）
-- 🤝 **OpenClaw Skill**：将 Sec-LLM 能力暴露为 OpenClaw 技能，支持 Telegram/Discord 等渠道调用
+### Agent 引擎
+- **自主执行**：Agent 接收目标 → 规划 → 执行工具 → 反思 → 生成报告，无需人工干预
+- **LangGraph 状态图**：5 节点图 `plan → execute → reflect → report`，最多 20 步
+- **Multi-Agent 协作**：ReconAgent → ExploitAgent → ReportAgent，通过 Blackboard 共享发现
+- **会话持久化**：Agent 会话自动写入 MySQL，支持异步非阻塞
+
+### 10 个 Agent 工具
+
+| 工具 | 类别 | 功能 |
+|------|------|------|
+| `browser_navigate` | 侦察 | Playwright 页面侦察，提取链接、表单、技术栈 |
+| `browser_check_xss` | 漏洞利用 | XSS 漏洞检测，payload 注入 + dialog 捕获 |
+| `browser_screenshot` | 侦察 | 网页截图 |
+| `shell_exec` | 侦察 | Docker 沙箱执行 nmap、sqlmap、nuclei 等工具 |
+| `phishing_analyzer` | 侦察 | 邮件钓鱼分析，风险评分，可疑 URL/IP 提取 |
+| `code_auditor` | 漏洞利用 | SAST 代码审计，漏洞发现 + 修复建议 |
+| `threat_intel_enrich` | 侦察 | IOC 富化（AbuseIPDB + AlienVault OTX） |
+| `threat_intel_report` | 报告 | AI 威胁情报研判报告（流式 Markdown） |
+| `rule_generator` | 报告 | YARA/Suricata 蓝队检测规则生成 |
+| `report_explainer` | 报告 | Nmap/Nessus 扫描 → 管理层执行摘要 |
+
+### 接口与界面
+
+| 界面 | 说明 |
+|------|------|
+| **Web 控制台** | Next.js Agent 面板：任务提交 + 实时日志流 + 报告查看 |
+| **CLI** | 6 条命令：`scan` `audit` `stream` `status` `report` `intel` |
+| **TUI** | Textual 终端界面：实时 Agent 监控 + 状态面板 |
+| **REST API** | 5 个 Agent 端点 + SSE 实时日志流 |
+| **OpenClaw Skill** | Telegram / Discord / Slack 渠道集成 |
+
+### 安全能力
+
+- **CVSS 3.1 评分** + **OWASP Top 10 分类**
+- **Auto-Fix PR**：自动创建分支 → 应用补丁 → 提交 → 推送 → 开 GitHub PR
+- **双引擎**：local (Ollama) / cloud (DeepSeek) 运行时切换
+- **沙箱隔离**：Docker 容器执行安全工具，内存/CPU/网络限制
 
 ---
 
-## 🆕 V3.0 升级重点
+## 项目架构
 
-- **威胁情报独立主模块**：从工具箱拆分为一级导航，避免功能遮挡与入口冲突
-- **IOC 自动精准嗅探**：后端自动识别 IPv4 / Domain / MD5 / SHA256，并按类型路由情报源
-- **并发容错富化**：`asyncio.gather + wait_for + return_exceptions=True`，单源失败不影响整体
-- **双段式响应体验**：先返回结构化情报结果，再流式生成中文研判报告
-- **报告生成增强**：威胁情报研判结果可自动并入报告，与日志分析/AI 对话一起导出
-- **安全工具箱页面化**：四个工具分别独立页面，维护与扩展更清晰
+```
+sec-llm-4.0/
+├── backend/
+│   ├── main.py              # FastAPI 入口 (~2,060 行, 从 v3.1 减少 18%)
+│   ├── config.py            # Pydantic Settings (集中式配置)
+│   ├── requirements.txt
+│   ├── alembic.ini          # 数据库迁移配置
+│   ├── migrations/          # Alembic 迁移
+│   ├── api/
+│   │   └── agent.py         # Agent API (5 端点 + SSE)
+│   ├── core/
+│   │   ├── llm/             # LLM 抽象层 (base, ollama, deepseek, router)
+│   │   ├── auth/            # 认证 (jwt, password, dependencies)
+│   │   └── rag/             # RAG 查询重写
+│   ├── tools/               # Agent 工具注册表 (10 工具)
+│   ├── agents/              # Agent 引擎
+│   │   ├── orchestrator.py  # LangGraph 状态图
+│   │   ├── supervisor.py    # Multi-Agent 编排器
+│   │   ├── collaboration.py # Blackboard 共享状态
+│   │   ├── reporting.py     # CVSS + OWASP
+│   │   └── specialists/     # Recon, Exploit, Fix
+│   ├── db/models.py         # SQLAlchemy ORM (6 张表)
+│   └── tests/               # 42+ 项测试
+├── frontend/                # Next.js 14
+│   ├── app/agent/           # Agent Web 控制台
+│   ├── components/          # AgentTaskPanel, AgentLogStream
+│   └── lib/agent-api.ts     # Agent API 客户端
+├── cli/                     # CLI + TUI
+│   ├── main.py              # Typer CLI (6 命令)
+│   └── tui.py               # Textual TUI
+├── sandbox/
+│   └── Dockerfile           # 隔离安全工具容器
+└── openclaw-skill/          # OpenClaw 集成
+```
 
 ---
 
-## 🛠 技术栈
+## 快速开始
 
-**后端**: Python 3.10+ | FastAPI | PyMySQL | LangChain | Chroma | Ollama | DeepSeek API  
-**前端**: Next.js 14 | React 18 | TypeScript | Tailwind CSS
-
----
-
-## 📦 环境要求
+### 环境要求
 
 - Python 3.10+
 - Node.js 18+
 - MySQL 8.x
 - Ollama（本地模型：`llama3:8b` + `nomic-embed-text`）
-- DeepSeek API Key（可选，启用云端时需要）
+- Docker（可选，用于沙箱工具执行）
+- DeepSeek API Key（可选，启用云端引擎）
 
-### 安装 Ollama 模型
-
-```bash
-ollama pull llama3:8b
-ollama pull nomic-embed-text
-```
-
----
-
-## 🚀 快速开始
-
-### 1. 克隆项目
+### 1. 克隆并安装
 
 ```bash
-git clone https://github.com/yusichen396/Sec-LLM-3.0.git
+git clone https://github.com/Mengxun326/Sec-LLM-3.0.git
 cd Sec-LLM-3.0
 ```
 
-### 2. 后端设置
+### 2. 后端
 
 ```bash
 cd backend
 python -m venv venv
-.\venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
+source venv/bin/activate   # Linux/Mac
+# .\venv\Scripts\activate  # Windows
 
 pip install -r requirements.txt
+pip install langgraph langgraph-checkpoint typer textual
 
-python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+# 配置 .env（参考下方配置说明）
+cp .env.example .env
+
+# 数据库迁移
+alembic upgrade head
+
+# 启动
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 3. 前端设置
+### 3. 前端
 
 ```bash
 cd frontend
@@ -108,214 +160,240 @@ npm install
 npm run dev
 ```
 
-### 4. 访问应用
+### 4. Docker 沙箱（可选）
 
-浏览器访问 `http://localhost:3000`  
-默认管理员账户：`admin` / `admin123`
+```bash
+cd sandbox
+docker build -t sec-llm-sandbox:latest .
+```
+
+### 5. 访问
+
+| 界面 | 地址 |
+|------|------|
+| Web 仪表盘 | `http://localhost:3000` |
+| Agent 控制台 | `http://localhost:3000/agent` |
+| API 文档 | `http://localhost:8000/docs` |
+| 默认账户 | `admin` / `admin123` |
 
 ---
 
-## ⚙️ 配置说明（backend/.env）
-
-关键字段：
-
-- `LLM_PROVIDER=local|cloud`（默认值，仅首次/兜底；运行时可前端切换）
-- `OLLAMA_BASE_URL` / `OLLAMA_MODEL_NAME`
-- `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL_NAME`
-- `ABUSEIPDB_API_KEY`（威胁情报源，可选）
-- `OTX_API_KEY`（AlienVault OTX，可选）
-- `THREAT_INTEL_TIMEOUT_SECONDS`（威胁情报源超时秒数，默认 4.0）
-- `DATABASE_TYPE=mysql`
-- `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DB`
-- `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_FROM` / `MAIL_PORT` / `MAIL_SERVER`
-- `MAIL_FROM_NAME` / `DOMAIN_URL`
-- `SEC_LLM_SKILL_API_KEY`（可选，用于 [OpenClaw Skill](#openclaw-skill-集成) 等外部调用）
-
-> 注意：`DEEPSEEK_API_KEY` 必须为真实可用密钥；否则云端对话会返回 401/400。
-
-### OpenClaw Skill 集成
-
-将 Sec-LLM 能力暴露为 [OpenClaw](https://github.com/openclaw/openclaw) 技能，使智能体可在 Telegram、Discord、Slack 等渠道调用威胁情报、RAG、钓鱼鉴定、源码审计等功能。
-
-#### 前置条件
-
-- Sec-LLM 后端已部署并可访问
-- OpenClaw 已安装并运行
-
-#### 配置步骤
-
-**1. 在 Sec-LLM 后端启用 Skill API Key**
-
-编辑 `backend/.env`，添加（建议使用强随机字符串）：
+## 配置说明（backend/.env）
 
 ```env
-SEC_LLM_SKILL_API_KEY=your-secure-random-key-here
-```
+# LLM 引擎
+LLM_PROVIDER=local          # local | cloud
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL_NAME=llama3:8b
+DEEPSEEK_API_KEY=sk-...     # 可选
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL_NAME=deepseek-chat
 
-重启 Sec-LLM 后端使配置生效。
+# 威胁情报（可选）
+ABUSEIPDB_API_KEY=...       # 可选
+OTX_API_KEY=...              # 可选
 
-**2. 安装 Skill 到 OpenClaw**
+# 数据库
+DATABASE_TYPE=mysql
+MYSQL_USER=root
+MYSQL_PASSWORD=your-password
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_DB=sec_llm_db
 
-将 `sec-llm` 目录复制到 OpenClaw 的 Skills 目录：
+# Agent 配置
+AGENT_MAX_STEPS=20
+AGENT_STEP_TIMEOUT_SECONDS=300
+AGENT_SANDBOX_IMAGE=sec-llm-sandbox:latest
 
-```bash
-# 默认路径（按 OpenClaw 版本可能不同）
-mkdir -p ~/.openclaw/workspace/skills
-cp -r openclaw-skill/sec-llm ~/.openclaw/workspace/skills/
+# 邮件（可选，用于注册验证）
+MAIL_USERNAME=...           # 可选
+MAIL_PASSWORD=...           # 可选
 
-# Windows (PowerShell)
-New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.openclaw\workspace\skills"
-Copy-Item -Recurse openclaw-skill\sec-llm "$env:USERPROFILE\.openclaw\workspace\skills\"
-```
-
-**3. 配置 OpenClaw 环境变量**
-
-在 OpenClaw 运行环境中设置（如 `~/.openclaw/.env` 或系统环境变量）：
-
-```bash
-export SEC_LLM_BASE_URL="http://localhost:8000"   # Sec-LLM 后端地址
-export SEC_LLM_SKILL_API_KEY="your-secure-random-key-here"
-```
-
-若 Sec-LLM 与 OpenClaw 不在同一主机，将 `localhost` 改为实际 IP 或域名。
-
-**4. 刷新 Skill**
-
-- 在 OpenClaw 对话中让智能体执行「刷新 skills」
-- 或重启 OpenClaw Gateway：`openclaw gateway restart`
-
-#### 支持能力
-
-| 能力         | 触发场景                     | 说明                         |
-|--------------|------------------------------|------------------------------|
-| 威胁情报     | 用户提供 IP/域名/MD5/SHA256  | 多源富化 + AI 研判报告       |
-| 钓鱼鉴定     | 用户提供邮件内容             | 分析是否为钓鱼/欺诈邮件      |
-| 源码审计     | 用户提供代码或文件路径       | 漏洞识别与修复建议           |
-| 规则生成     | 用户描述检测需求             | YARA/Suricata 等蓝队规则     |
-| 报告解析     | 用户提供 Nmap/Nessus 报告     | 转为管理层可读摘要           |
-| 安全问答/RAG | 用户提问                     | 基于知识库的安全领域问答     |
-
-#### 使用示例
-
-在 OpenClaw 接入的 Telegram、Discord 等渠道中，用户可直接用自然语言触发：
-
-- 「分析 IP 8.8.8.8 的威胁情报」
-- 「这封邮件是钓鱼吗：[粘贴邮件内容]」
-- 「审计这段 Python 代码的安全问题」
-- 「生成一个检测 Cobalt Strike 的 YARA 规则」
-- 「把这段 Nmap 报告翻译成管理层能懂的摘要」
-- 「根据知识库回答：什么是 XSS？」
-
-#### 故障排查
-
-| 现象           | 可能原因                         |
-|----------------|----------------------------------|
-| 401 Unauthorized | Skill Key 与后端 `.env` 不一致   |
-| 连接失败       | `SEC_LLM_BASE_URL` 错误或 Sec-LLM 未启动 |
-| Skill 无反应   | 未刷新/重启，Skill 未加载       |
-
-更多说明见 [openclaw-skill/README.md](openclaw-skill/README.md)。
-
----
-
-## ✅ 数据库连接验证
-
-### 方式一：看启动日志
-
-后端启动时会打印类似：
-```
-[DB] Using MySQL Database: host:port/db
-```
-若连接失败会直接抛出异常。
-
-### 方式二：接口验证
-
-访问 `http://localhost:8000/api/dashboard/stats`，如果返回非全 0 的统计数据，说明数据库连接正常且可查询。
-
-### 方式三：命令行快速测试
-
-在 `backend` 目录执行：
-```powershell
-.\venv\Scripts\python.exe -c "import os;from dotenv import load_dotenv;import pymysql;load_dotenv(r'H:\sec-llm-local\backend\.env');conn=pymysql.connect(host=os.getenv('MYSQL_HOST'),user=os.getenv('MYSQL_USER'),password=os.getenv('MYSQL_PASSWORD'),port=int(os.getenv('MYSQL_PORT')),database=os.getenv('MYSQL_DB'));cur=conn.cursor();cur.execute('SELECT 1');print(cur.fetchone());conn.close()"
+# OpenClaw Skill API Key（可选）
+SEC_LLM_SKILL_API_KEY=your-secure-key
 ```
 
 ---
 
-## 📡 API 文档
+## CLI / TUI
 
-启动后端后访问：`http://localhost:8000/docs`
+### CLI 命令
 
-### 主要接口
+```bash
+# 安装
+cd cli && pip install typer httpx
+
+# Web 扫描
+python main.py scan https://example.com --mode quick
+
+# 代码审计
+python main.py audit ./src --language python
+
+# 实时查看 Agent 日志
+python main.py stream <session_id>
+
+# 查看状态
+python main.py status <session_id>
+
+# 查看报告
+python main.py report <session_id>
+
+# 威胁情报查询
+python main.py intel 8.8.8.8
+
+# 自定义 API 地址
+python main.py --base-url https://your-server:8000 scan example.com
+```
+
+### TUI 终端界面
+
+```bash
+pip install textual
+python tui.py
+```
+
+---
+
+## API 文档
+
+启动后端后访问 `http://localhost:8000/docs`
+
+### Agent API（v4.0 新增）
+
+| 方法 | 端点 | 认证 | 说明 |
+|------|------|------|------|
+| POST | `/api/agent/run` | JWT / Skill Key | 提交 Agent 任务 |
+| GET | `/api/agent/sessions` | JWT / Skill Key | 列出最近会话 |
+| GET | `/api/agent/{id}/status` | JWT / Skill Key | 会话状态与进度 |
+| GET | `/api/agent/{id}/stream` | JWT / Skill Key | SSE 实时日志流 |
+| GET | `/api/agent/{id}/report` | JWT / Skill Key | 最终安全报告 |
+
+### 示例
+
+```bash
+# 提交 Agent 任务
+curl -X POST http://localhost:8000/api/agent/run \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"https://example.com","task_type":"web_scan","provider":"local"}'
+
+# 查看状态
+curl http://localhost:8000/api/agent/<session_id>/status \
+  -H "Authorization: Bearer <token>"
+
+# 流式日志（SSE）
+curl -N http://localhost:8000/api/agent/<session_id>/stream \
+  -H "Authorization: Bearer <token>"
+```
+
+### 现有 API 端点（v3.1 保留）
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
-| POST | `/api/register` | 用户注册（发送验证邮件） |
-| GET | `/api/verify` | 邮箱验证激活 |
-| POST | `/api/resend-verification` | 重发验证邮件 |
+| POST | `/api/register` | 用户注册 |
 | POST | `/api/login` | 用户登录 |
-| GET | `/api/me` | 获取当前用户 |
-| GET | `/api/llm/provider` | 获取当前用户引擎偏好 |
-| PUT | `/api/llm/provider` | 更新当前用户引擎偏好 |
-| GET | `/api/dashboard/stats` | 仪表盘统计 |
-| POST | `/api/upload` | 文件上传（RAG/日志分析） |
-| POST | `/api/chat` | 流式 AI 对话 |
-| POST | `/api/security-tools/phishing-analyzer` | 钓鱼邮件智能鉴定 |
-| POST | `/api/security-tools/code-audit` | 源码漏洞审计 |
-| POST | `/api/security-tools/rule-generator` | 蓝队规则流式生成 |
+| POST | `/api/chat` | 流式 AI 对话（含 RAG） |
+| POST | `/api/upload` | 日志分析 / RAG 上传 |
+| POST | `/api/security-tools/phishing-analyzer` | 钓鱼邮件鉴定 |
+| POST | `/api/security-tools/code-audit` | 代码审计 |
+| POST | `/api/security-tools/rule-generator` | 蓝队规则生成 |
 | POST | `/api/security-tools/report-explainer` | 扫描报告解析 |
-| POST | `/api/security-tools/threat-intel/enrich` | IOC 情报富化（结构化） |
-| POST | `/api/security-tools/threat-intel/report` | 威胁情报 AI 研判报告（流式） |
-| GET | `/api/log-records` | 获取日志审计记录（当前用户） |
-| PUT | `/api/log-records/{id}/status` | 更新日志状态（当前用户） |
-| DELETE | `/api/log-records/{id}` | 删除日志记录（当前用户） |
-| GET | `/api/chat-histories` | 获取对话历史（当前用户） |
-| POST | `/api/chat-histories` | 新建对话历史 |
-| PUT | `/api/chat-histories/{id}` | 更新对话历史 |
-| DELETE | `/api/chat-histories/{id}` | 删除对话历史 |
-| GET | `/api/knowledge/files` | 获取知识库文件列表（当前用户） |
-| DELETE | `/api/knowledge/files/{id}` | 删除知识库文件（当前用户） |
+| POST | `/api/security-tools/threat-intel/enrich` | IOC 情报富化 |
+| POST | `/api/security-tools/threat-intel/report` | 威胁情报 AI 研判 |
+| GET | `/api/dashboard/stats` | 仪表盘统计 |
+| GET | `/api/knowledge/files` | 知识库文件列表 |
 
 ---
 
-## 📝 项目结构
+## OpenClaw Skill 集成
 
-```
-sec-llm-local/
-├── backend/          # FastAPI 后端
-│   ├── main.py      # 主程序
-│   └── requirements.txt
-├── frontend/         # Next.js 前端
-│   ├── app/
-│   │   ├── security-tools/      # 安全工具箱（4个独立页面）
-│   │   ├── threat-intel-agent/  # 威胁情报自动化研判（独立一级功能）
-│   │   └── report-generation/   # 报告导出（聚合日志/对话/情报）
-│   └── lib/         # API 客户端
-├── openclaw-skill/   # OpenClaw Skill 集成
-│   ├── sec-llm/     # Skill 定义与辅助脚本
-│   └── README.md
-└── README.md
+将 Sec-LLM 能力暴露为 OpenClaw 技能，支持 Telegram / Discord / Slack 渠道。
+
+```bash
+# 1. 配置 backend/.env
+SEC_LLM_SKILL_API_KEY=your-secure-key
+
+# 2. 安装 Skill
+cp -r openclaw-skill/sec-llm ~/.openclaw/workspace/skills/
+
+# 3. 配置 OpenClaw 环境变量
+export SEC_LLM_BASE_URL="http://localhost:8000"
+export SEC_LLM_SKILL_API_KEY="your-secure-key"
+
+# 4. 使用
+# 在 Telegram/Discord 中:
+#   "分析 IP 8.8.8.8 的威胁情报"
+#   "扫描 https://example.com"
+#   "审计这段 Python 代码"
 ```
 
 ---
 
-## ⚠️ 安全提示
+## 技术栈
+
+| 层 | 技术 |
+|---|------|
+| **Agent 引擎** | LangGraph 1.2, LangChain |
+| **后端** | Python 3.10+, FastAPI, PyMySQL, SQLAlchemy |
+| **LLM** | Ollama (llama3:8b), DeepSeek API, OpenAI SDK |
+| **前端** | Next.js 14, React 18, TypeScript, Tailwind CSS |
+| **向量数据库** | ChromaDB + OllamaEmbeddings (nomic-embed-text) |
+| **数据库** | MySQL 8.x, Alembic 迁移 |
+| **浏览器自动化** | Playwright (Chromium) |
+| **沙箱** | Docker + docker-py |
+| **CLI/TUI** | Typer, Textual, Rich |
+| **测试** | pytest (42+ 项) |
+| **CI/CD** | GitHub Actions |
+
+---
+
+## 测试
+
+```bash
+cd backend
+pip install pytest pytest-asyncio
+python -m pytest tests/ -v
+```
+
+```
+tests/test_tool_registry.py .........   9 passed
+tests/test_agent_orchestrator.py .....  5 passed
+tests/test_llm_router.py ......         6 passed
+tests/test_auth.py ....                 4 passed
+tests/test_tools.py ............       12 passed
+tests/test_agent_supervisor.py ......  10 passed
+====================================== 46 passed ==============================
+```
+
+---
+
+## 从 v3.1 升级
+
+| 指标 | v3.1 | v4.0 |
+|------|------|------|
+| 类型 | 聊天机器人 + RAG | AI Agent 平台 |
+| 工具 | 0（内联端点） | 10（可插拔注册表） |
+| Agent 引擎 | 无 | LangGraph 5 节点图 |
+| Multi-Agent | 无 | Supervisor + 3 专业 Agent |
+| CLI | 无 | 6 命令 + TUI |
+| Web 控制台 | 仪表盘 | 仪表盘 + Agent 控制台 |
+| 代码结构 | 1 个单体文件 (2,500 行) | 50+ 模块化文件 |
+| 测试 | 0 | 46 项 |
+| 数据库 | 原始 SQL | 原始 SQL + ORM + Alembic |
+
+---
+
+## 安全提示
 
 - 生产环境请修改 `JWT_SECRET_KEY` 与默认管理员密码
 - 不要将 API Key 提交到代码仓库
 - 建议使用专用 MySQL 账号并限制权限
-
----
-
-## 👨‍💻 作者信息
-
-| 角色 | 姓名 | 说明 |
-|------|------|------|
-| **第一作者** | 雨思晨 | 项目负责人、核心开发 |
-| **开发团队** | 灵犀网卫 | 网络安全技术团队 |
+- Docker 沙箱默认禁用网络、限制内存/CPU、只读根文件系统
 
 ---
 
 <p align="center">
-  <b>Sec-LLM-Local</b> - 网络安全专用大语言模型平台<br>
+  <b>Sec-LLM 4.0</b> — AI Agent 网络安全平台<br>
   第一作者：<b>雨思晨</b> | 开发团队：<b>灵犀网卫</b>
 </p>

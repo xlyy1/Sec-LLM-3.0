@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getLLMProvider, setLLMProvider, type LLMProvider } from '@/lib/api';
 
 interface LLMProviderToggleProps {
@@ -18,12 +18,15 @@ export default function LLMProviderToggle({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const onProviderChangeRef = useRef(onProviderChange);
+  onProviderChangeRef.current = onProviderChange;
+
   useEffect(() => {
     const loadProvider = async () => {
       try {
         const data = await getLLMProvider();
         setActiveProvider(data.provider);
-        onProviderChange?.(data.provider);
+        onProviderChangeRef.current?.(data.provider);
       } catch (err: any) {
         if (err?.response?.status === 401 && onAuthExpired) {
           onAuthExpired();
@@ -43,7 +46,7 @@ export default function LLMProviderToggle({
     try {
       const result = await setLLMProvider(targetProvider);
       setActiveProvider(result.provider);
-      onProviderChange?.(result.provider);
+      onProviderChangeRef.current?.(result.provider);
     } catch (err: any) {
       if (err?.response?.status === 401 && onAuthExpired) {
         onAuthExpired();

@@ -1,0 +1,40 @@
+"""Agent state schema for LangGraph StateGraph."""
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
+
+from langgraph.graph.message import add_messages
+
+
+class AgentTask(TypedDict, total=False):
+    """Input task specification."""
+    target: str
+    task_type: str  # "web_scan" | "code_audit" | "threat_intel" | "comprehensive"
+    provider: str   # "local" | "cloud"
+
+
+class AgentState(TypedDict):
+    """State carried through the agent execution graph."""
+    # Input
+    task: str                          # Original task description
+    target: str                        # Target URL, IP, file path, or repo
+    task_type: str                     # web_scan / code_audit / threat_intel / comprehensive
+    provider: str                      # local or cloud
+
+    # Conversation
+    messages: Annotated[List[Dict[str, str]], add_messages]
+
+    # Planning
+    plan: List[Dict[str, Any]]         # [{tool, args, reason, status}]
+    current_step: int                  # Index into plan
+
+    # Execution results
+    observations: List[Dict[str, Any]] # [{tool, args, result, duration_ms}]
+    findings: List[Dict[str, Any]]     # [{title, severity, description, evidence, file, line}]
+
+    # Control flow
+    phase: str                         # planning | recon | exploit | verify | report | done | error
+    status: str                        # running | completed | failed
+    error: Optional[str]
+
+    # Output
+    report: Optional[str]              # Final report markdown
+    logs: List[str]                    # Execution log stream for SSE

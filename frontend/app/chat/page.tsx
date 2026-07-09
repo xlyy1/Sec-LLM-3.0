@@ -118,7 +118,7 @@ export default function ChatPage() {
         if (histories.length > 0) {
           setChatHistories(histories);
         } else if (messagesRef.current.length > 0) {
-          // 回退显示当前会话，避免接口异常/空结果时侧栏“看起来全丢了”
+          // 回退显示当前会话，避免接口异常/空结果时侧栏"看起来全丢了"
           setChatHistories([
             {
               id: -1,
@@ -339,7 +339,13 @@ export default function ChatPage() {
         }),
       });
 
-      if (!response.ok) throw new Error(response.statusText);
+      if (!response.ok) {
+        if (response.status === 401) {
+          handleLogout();
+          return;
+        }
+        throw new Error(response.statusText);
+      }
       if (!response.body) throw new Error('No response body');
 
       // 4. 读取流

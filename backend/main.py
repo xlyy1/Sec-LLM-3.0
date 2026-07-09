@@ -4,7 +4,7 @@ import shutil
 import threading
 import time
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 # --- 🔥 核心补丁：强制关闭代理 ---
@@ -13,10 +13,8 @@ os.environ['no_proxy'] = 'localhost,127.0.0.1'
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
-from pydantic_settings import BaseSettings
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_chroma import Chroma
@@ -31,70 +29,10 @@ from openai import OpenAI  # 引入 OpenAI 库
 
 # ================= 数据库 & 认证相关导入 =================
 import pymysql
-from passlib.context import CryptContext
 from jose import JWTError, jwt
 
-# ================= ⚙️ 配置管理系统 =================
-class Settings(BaseSettings):
-    # 基础配置
-    ENV_MODE: str = "dev"
-    JWT_SECRET_KEY: str = "default-unsafe-secret-key"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
-
-    # LLM 核心配置
-    LLM_PROVIDER: str = "local"  # local 或 cloud
-
-    # 云端 DeepSeek 配置
-    DEEPSEEK_API_KEY: Optional[str] = None
-    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
-    DEEPSEEK_MODEL_NAME: str = "deepseek-chat"
-    ABUSEIPDB_API_KEY: Optional[str] = None
-    OTX_API_KEY: Optional[str] = None
-    THREAT_INTEL_TIMEOUT_SECONDS: float = 4.0
-
-    # 本地 Ollama 配置
-    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
-    OLLAMA_MODEL_NAME: str = "llama3:8b"
-    RAG_ONLY_MAX_DISTANCE: float = 1.2
-
-    # 数据库配置
-    DATABASE_TYPE: str = "mysql"  # 选项: sqlite, mysql
-
-    # MySQL 配置 (可选)
-    MYSQL_USER: str = "root"
-    MYSQL_PASSWORD: str = ""
-    MYSQL_HOST: str = "localhost"
-    MYSQL_PORT: int = 3306
-    MYSQL_DB: str = "sec_llm_db"
-
-    # 邮件配置（未配置时邮箱验证相关接口会返回明确错误）
-    MAIL_USERNAME: Optional[str] = None
-    MAIL_PASSWORD: Optional[str] = None
-    MAIL_FROM: Optional[EmailStr] = None
-    MAIL_PORT: int = 587
-    MAIL_SERVER: Optional[str] = None
-    MAIL_FROM_NAME: str = "Sec-LLM Security Team"
-    DOMAIN_URL: str = "http://localhost:3000"
-
-    # OpenClaw Skill 集成：API Key 认证（可选，配置后允许 X-Skill-Api-Key 调用）
-    SEC_LLM_SKILL_API_KEY: Optional[str] = None
-
-    class Config:
-        env_file = ".env"
-
-
-settings = Settings()
-
-
-def normalize_provider(provider: Optional[str]) -> str:
-    p = (provider or "").strip().lower()
-    return p if p in {"local", "cloud"} else "local"
-
-
-def get_user_provider(current_user: Optional[Dict[str, Any]]) -> str:
-    if current_user and current_user.get("llm_provider"):
-        return normalize_provider(current_user.get("llm_provider"))
-    return normalize_provider(settings.LLM_PROVIDER)
+# ================= ⚙️ 配置管理系统 (from config.py) =================
+from config import settings, normalize_provider, get_user_provider
 
 
 def _mail_config_ready() -> bool:
@@ -121,12 +59,15 @@ if _mail_config_ready():
         VALIDATE_CERTS=True,
     )
 
-# JWT 配置使用 Settings
-SECRET_KEY = settings.JWT_SECRET_KEY
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
-
-# ================= 数据库配置 (MySQL 直连) =================
+# ================= 认证模块 (from core.auth) =================
+from core.auth.password import verify_password, get_password_hash
+from core.auth.jwt import create_access_token, get_current_user, oauth2_scheme, SECRET_KEY, ALGORITHM
+from core.auth.dependencies import (
+    get_current_active_user,
+    get_current_admin_user,
+    get_current_user_or_skill,
+    get_db,
+)
 
 def get_db_connection():
     return pymysql.connect(
@@ -282,114 +223,54 @@ def init_db():
                 cursor.execute("ALTER TABLE knowledge_files ADD COLUMN user_id INT")
                 cursor.execute("CREATE INDEX idx_knowledge_files_user_id ON knowledge_files(user_id)")
 
-            # 兼容历史数据：旧数据默认归属 admin，避免升级后“全丢失”
+            # --- Agent 平台新表 ---
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    id VARCHAR(8) PRIMARY KEY,
+                    user_id INT,
+                    target VARCHAR(500) NOT NULL,
+                    task_type VARCHAR(50) DEFAULT 'web_scan',
+                    provider VARCHAR(20) DEFAULT 'local',
+                    status VARCHAR(20) DEFAULT 'running',
+                    phase VARCHAR(50) NULL,
+                    findings_count INT DEFAULT 0,
+                    steps_completed INT DEFAULT 0,
+                    steps_total INT DEFAULT 0,
+                    report TEXT NULL,
+                    logs JSON NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_findings (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    session_id VARCHAR(8) NOT NULL,
+                    title VARCHAR(500) NOT NULL,
+                    severity VARCHAR(20) NOT NULL,
+                    description TEXT NULL,
+                    evidence JSON NULL,
+                    cve_id VARCHAR(50) NULL,
+                    cvss_score DECIMAL(3,1) NULL,
+                    file_path VARCHAR(500) NULL,
+                    line_number INT NULL,
+                    fixed_code TEXT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+
+            # 兼容历史数据：旧数据默认归属 admin，避免升级后"全丢失"
             cursor.execute("SELECT id FROM users WHERE username=%s LIMIT 1", ("admin",))
             admin_row = cursor.fetchone()
             if admin_row:
                 admin_id = admin_row["id"]
                 cursor.execute("UPDATE log_records SET user_id=%s WHERE user_id IS NULL", (admin_id,))
                 cursor.execute("UPDATE knowledge_files SET user_id=%s WHERE user_id IS NULL", (admin_id,))
-
-
-# ================= 密码加密工具 =================
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """验证密码"""
-    return pwd_context.verify(plain_password, hashed_password)
-
-def get_password_hash(password: str) -> str:
-    """生成密码哈希"""
-    return pwd_context.hash(password)
-
-# ================= JWT Token 工具 =================
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """创建 JWT Token"""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-# ================= 数据库依赖 =================
-def get_db():
-    """获取数据库连接"""
-    conn = get_db_connection()
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-# ================= OAuth2 配置 =================
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login", auto_error=False)
-
-async def get_current_user(token: str = Depends(oauth2_scheme), db=Depends(get_db)) -> Optional[Dict[str, Any]]:
-    """从 Token 获取当前用户"""
-    if not token:
-        return None
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            return None
-    except JWTError:
-        return None
-    
-    with db.cursor() as cursor:
-        cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
-        return cursor.fetchone()
-
-async def get_current_active_user(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    """获取当前活跃用户（必须登录）"""
-    if current_user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="未登录或 Token 已过期",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return current_user
-
-
-async def get_current_user_or_skill(
-    request: Request,
-    token: Optional[str] = Depends(oauth2_scheme),
-    db=Depends(get_db),
-) -> Dict[str, Any]:
-    """支持 JWT 或 OpenClaw Skill API Key 认证。Skill Key 有效时以 admin 身份调用。"""
-    # 1. 优先检查 Skill API Key（用于 OpenClaw 等外部调用）
-    skill_key = request.headers.get("X-Skill-Api-Key")
-    if (
-        settings.SEC_LLM_SKILL_API_KEY
-        and skill_key
-        and secrets.compare_digest(skill_key, settings.SEC_LLM_SKILL_API_KEY)
-    ):
-        with db.cursor() as cursor:
-            cursor.execute("SELECT * FROM users WHERE username=%s", ("admin",))
-            admin_user = cursor.fetchone()
-        if admin_user:
-            return admin_user
-    # 2. 回退到 JWT 认证
-    user = await get_current_user(token, db)
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="未登录、Token 已过期或 Skill API Key 无效",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return user
-
-
-async def get_current_admin_user(current_user: Dict[str, Any] = Depends(get_current_active_user)) -> Dict[str, Any]:
-    """获取当前管理员用户（必须登录且角色为 admin）"""
-    if current_user.get("role") != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="需要管理员权限",
-        )
-    return current_user
 
 
 # ================= 初始化默认管理员账户 =================
@@ -416,7 +297,20 @@ def init_default_admin():
                 print("[OK] 管理员账户已存在")
 
 
-app = FastAPI(title="Sec-LLM RAG Backend", version="3.1")
+app = FastAPI(title="Sec-LLM Agent Platform", version="4.0")
+
+# --- Agent API routes ---
+from api.agent import router as agent_router
+app.include_router(agent_router)
+
+# --- Import tools to auto-register with the tool registry ---
+import tools.phishing      # noqa: E402
+import tools.code_audit    # noqa: E402
+import tools.rule_gen      # noqa: E402
+import tools.report        # noqa: E402
+import tools.threat_intel  # noqa: E402
+import tools.browser       # noqa: E402
+import tools.shell         # noqa: E402
 
 # 配置 CORS
 app.add_middleware(
@@ -519,7 +413,7 @@ embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url=settings.OLLAMA
 try:
     vector_store = Chroma(persist_directory=VECTOR_DB_DIR, embedding_function=embeddings)
     print("[OK] 已加载本地知识库")
-except:
+except Exception:
     vector_store = None
     print("[WARN] 暂无知识库，等待上传文件")
 
@@ -649,7 +543,7 @@ async def send_verification_email_safe(email: str, token: str):
 # --- 接口 1: 健康检查 ---
 @app.get("/")
 def health_check():
-    return {"status": "online", "system": "Sec-LLM V3.1", "provider": settings.LLM_PROVIDER}
+    return {"status": "online", "system": "Sec-LLM Agent Platform v4.0", "provider": settings.LLM_PROVIDER}
 
 # --- 接口 2: 用户注册 ---
 @app.post("/api/register")
@@ -777,14 +671,14 @@ def login(req: LoginRequest, db=Depends(get_db)):
 
     if not user.get("is_active", False):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="账户未激活，请检查邮箱完成验证",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
         )
-    
+
     # 更新最后登录时间
     with db.cursor() as cursor:
-        cursor.execute("UPDATE users SET last_login=%s WHERE id=%s", (datetime.utcnow(), user["id"]))
-    
+        cursor.execute("UPDATE users SET last_login=%s WHERE id=%s", (datetime.now(timezone.utc), user["id"]))
+
     # 生成 JWT Token
     access_token = create_access_token(data={"sub": user["username"]})
     
@@ -968,9 +862,10 @@ def delete_log_record(record_id: int, current_user: Dict[str, Any] = Depends(get
 # --- 接口 5.06: AI 对话历史 ---
 @app.get("/api/chat-histories")
 def get_chat_histories(
+    request: Request,
     limit: int = 50,
     offset: int = 0,
-    current_user: Dict[str, Any] = Depends(get_current_active_user),
+    current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
     conn = get_db_connection()
     try:
@@ -1014,8 +909,9 @@ def get_chat_histories(
 
 @app.post("/api/chat-histories")
 def create_chat_history(
+    request: Request,
     payload: ChatHistoryCreate,
-    current_user: Dict[str, Any] = Depends(get_current_active_user),
+    current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
     title = (payload.title or "新对话").strip()[:10]
     messages_json = json.dumps([m.dict() for m in payload.messages], ensure_ascii=False)
@@ -1041,8 +937,9 @@ def create_chat_history(
 
 @app.delete("/api/chat-histories/{history_id}")
 def delete_chat_history(
+    request: Request,
     history_id: int,
-    current_user: Dict[str, Any] = Depends(get_current_active_user),
+    current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
     conn = get_db_connection()
     try:
@@ -1062,9 +959,10 @@ def delete_chat_history(
 
 @app.put("/api/chat-histories/{history_id}")
 def update_chat_history(
+    request: Request,
     history_id: int,
     payload: ChatHistoryUpdate,
-    current_user: Dict[str, Any] = Depends(get_current_active_user),
+    current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
     title = (payload.title or "").strip()
     safe_title = title[:10] if title else None
@@ -1165,33 +1063,7 @@ def manual_cleanup_temp(_current_admin: Dict[str, Any] = Depends(get_current_adm
     }
 
 # --- 辅助函数：AI 日志分析 ---
-def extract_json_from_text(text: str):
-    """
-    从 LLM 的回复中提取 JSON 部分，处理 Markdown 代码块
-    """
-    try:
-        # 1. 尝试直接解析
-        return json.loads(text)
-    except Exception:
-        pass
-
-    # 2. 尝试提取 ```json ... ``` 之间的内容
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except Exception:
-            pass
-
-    # 3. 尝试提取最外层 {} 之间的内容
-    match = re.search(r"(\{.*\})", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except Exception:
-            pass
-
-    return None
+from tools.registry import _extract_json as extract_json_from_text
 
 
 def _build_log_analysis_prompts(log_content: str):
@@ -1222,112 +1094,29 @@ def _build_log_analysis_prompts(log_content: str):
     return system_prompt, user_prompt
 
 
-def _local_llm_analysis(log_content: str):
-    system_prompt, user_prompt = _build_log_analysis_prompts(log_content)
-    url = f"{settings.OLLAMA_BASE_URL}/api/chat"
-    payload = {
-        "model": settings.OLLAMA_MODEL_NAME,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": False,
-        "format": "json",
-        "options": {
-            "temperature": 0.1,
-            "num_ctx": 4096
-        }
-    }
-    resp = requests.post(url, json=payload, proxies={"http": None, "https": None})
-    resp.raise_for_status()
-    ai_text = resp.json()["message"]["content"]
-    print("[AI-Local] Raw Response:", ai_text[:50] + "..." if len(ai_text) > 50 else ai_text)
-    result = extract_json_from_text(ai_text)
-    if not result:
-        return {
-            "summary": "AI 输出未能解析为 JSON",
-            "threat_level": "Unknown",
-            "details": [],
-            "advice": "请检查模型输出格式，或切换为云端模型"
-        }
-    return result
 
-
-def _cloud_llm_analysis(log_content: str):
-    if not settings.DEEPSEEK_API_KEY or deepseek_client is None:
-        return {
-            "summary": "DeepSeek API Key 未配置或客户端未初始化",
-            "threat_level": "Unknown",
-            "details": [],
-            "advice": "请在 backend/.env 中设置 DEEPSEEK_API_KEY"
-        }
-    system_prompt, user_prompt = _build_log_analysis_prompts(log_content)
-    response = deepseek_client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-        response_format={"type": "json_object"}
-    )
-    ai_text = response.choices[0].message.content
-    print("[AI-Cloud] Raw Response:", ai_text[:50] + "..." if len(ai_text) > 50 else ai_text)
-    result = extract_json_from_text(ai_text)
-    if not result:
-        return {
-            "summary": "AI 输出未能解析为 JSON",
-            "threat_level": "Unknown",
-            "details": [],
-            "advice": "请检查模型输出格式，或切换为本地模型"
-        }
-    return result
+def _single_shot_completion(messages: List[Dict[str, str]], provider: str) -> str:
+    """Delegate to core.llm.router for unified provider dispatch."""
+    import asyncio
+    from core.llm.router import single_shot_completion
+    return asyncio.run(single_shot_completion(messages, provider=provider, temperature=0.2, json_mode=True))
 
 
 def real_llm_analysis(log_content: str, provider: Optional[str] = None):
-    """
-    统一入口：根据配置决定是调用 本地 Ollama 还是 云端 DeepSeek
-    """
+    """Delegate to core.llm.router for log analysis."""
     selected_provider = normalize_provider(provider or settings.LLM_PROVIDER)
     print(f"[ANALYSIS] 开始日志分析 (Provider: {selected_provider})...")
     try:
-        if selected_provider == "cloud":
-            return _cloud_llm_analysis(log_content)
-        return _local_llm_analysis(log_content)
+        system_prompt, user_prompt = _build_log_analysis_prompts(log_content)
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        raw = _single_shot_completion(messages, selected_provider)
+        result = extract_json_from_text(raw)
+        if result is None:
+            return {"summary": "AI 输出未能解析为 JSON", "threat_level": "Unknown", "details": [], "advice": "请检查模型输出格式"}
+        return result
     except Exception as e:
         print(f"[ERROR] AI 调用出错: {e}")
-        return {
-            "summary": f"分析服务异常: {str(e)}",
-            "threat_level": "Unknown",
-            "details": [],
-            "advice": "请检查后台日志或显存状态。"
-        }
-
-
-def _single_shot_completion(messages: List[Dict[str, str]], provider: str) -> str:
-    """统一单次非流式补全，用于工具类结构化输出。"""
-    selected_provider = normalize_provider(provider)
-    if selected_provider == "cloud":
-        if not settings.DEEPSEEK_API_KEY or deepseek_client is None:
-            raise RuntimeError("云端引擎未配置")
-        response = deepseek_client.chat.completions.create(
-            model=settings.DEEPSEEK_MODEL_NAME,
-            messages=messages,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
-        return response.choices[0].message.content or ""
-
-    payload = {
-        "model": settings.OLLAMA_MODEL_NAME,
-        "messages": messages,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.2, "num_ctx": 4096},
-    }
-    resp = requests.post(f"{settings.OLLAMA_BASE_URL}/api/chat", json=payload, timeout=60)
-    resp.raise_for_status()
-    return resp.json().get("message", {}).get("content", "")
+        return {"summary": f"分析服务异常: {str(e)}", "threat_level": "Unknown", "details": [], "advice": "请检查后台日志或显存状态。"}
 
 
 IOC_IPV4_RE = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
@@ -1570,10 +1359,10 @@ Rules:
                     "stream": True,
                     "temperature": 0.2,
                 }
-                async with httpx.AsyncClient(timeout=None) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                     async with client.stream("POST", cloud_url, headers=headers, json=payload) as resp:
                         if resp.status_code >= 400:
-                            detail = (await resp.aread()).decode("utf-8", errors="ignore")[:600]
+                            detail = (await resp.aread()).decode("utf-8", errors="ignore")[:200]
                             yield f"⚠️ 云端请求失败({resp.status_code}): {detail}"
                             return
                         async for line in resp.aiter_lines():
@@ -1601,7 +1390,7 @@ Rules:
                     "stream": True,
                     "options": {"temperature": 0.2},
                 }
-                async with httpx.AsyncClient(timeout=None) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                     async with client.stream("POST", f"{settings.OLLAMA_BASE_URL}/api/chat", json=payload) as resp:
                         resp.raise_for_status()
                         async for line in resp.aiter_lines():
@@ -1836,8 +1625,8 @@ async def threat_intel_report(
 你是资深威胁情报分析师。请基于给定情报证据撰写中文研判报告。
 要求：
 1) 输出为 Markdown，包含：执行摘要、威胁归因猜测、主要攻击手法、处置建议、误报风险提示。
-2) 结论要标注“依据来源”（例如 AbuseIPDB/OTX）。
-3) 禁止编造不存在的数据；不确定时明确写“暂无充分证据”。
+2) 结论要标注"依据来源"（例如 AbuseIPDB/OTX）。
+3) 禁止编造不存在的数据；不确定时明确写"暂无充分证据"。
 4) 不输出 JSON。
 """
     model_messages = [
@@ -1866,10 +1655,10 @@ async def threat_intel_report(
                     "stream": True,
                     "temperature": 0.2,
                 }
-                async with httpx.AsyncClient(timeout=None) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                     async with client.stream("POST", cloud_url, headers=headers, json=payload) as resp:
                         if resp.status_code >= 400:
-                            detail = (await resp.aread()).decode("utf-8", errors="ignore")[:600]
+                            detail = (await resp.aread()).decode("utf-8", errors="ignore")[:200]
                             yield f"⚠️ 云端请求失败({resp.status_code}): {detail}"
                             return
                         async for line in resp.aiter_lines():
@@ -1897,7 +1686,7 @@ async def threat_intel_report(
                     "stream": True,
                     "options": {"temperature": 0.2},
                 }
-                async with httpx.AsyncClient(timeout=None) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                     async with client.stream("POST", f"{settings.OLLAMA_BASE_URL}/api/chat", json=payload) as resp:
                         resp.raise_for_status()
                         async for line in resp.aiter_lines():
@@ -1951,22 +1740,23 @@ async def upload_file(
         # RAG 知识库上传
         try:
             # 1. 按用户分目录保存，避免不同用户文件冲突
+            safe_filename = os.path.basename(file.filename)
             user_upload_dir = os.path.join("uploads", f"user_{current_user['id']}")
             os.makedirs(user_upload_dir, exist_ok=True)
-            uploads_path = os.path.join(user_upload_dir, file.filename)
-            
+            uploads_path = os.path.join(user_upload_dir, safe_filename)
+
             with open(uploads_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
             print(f"[UPLOAD] 文件已永久保存到: {uploads_path}")
-            
+
             # 2. 复制到 temp/ （用于 RAG 处理，会被自动清理）
             user_temp_dir = os.path.join("temp", f"user_{current_user['id']}")
             os.makedirs(user_temp_dir, exist_ok=True)
-            temp_path = os.path.join(user_temp_dir, file.filename)
+            temp_path = os.path.join(user_temp_dir, safe_filename)
             shutil.copy2(uploads_path, temp_path)
-            
+
             # 3. 从 temp 目录加载文件进行 RAG 处理
-            if file.filename.endswith(".pdf"):
+            if safe_filename.endswith(".pdf"):
                 loader = PyPDFLoader(temp_path)
             else:
                 loader = TextLoader(temp_path, encoding="utf-8")
@@ -1988,10 +1778,10 @@ async def upload_file(
                     embedding=embeddings,
                     persist_directory=VECTOR_DB_DIR
                 )
-                print(f"[OK] 创建新知识库，添加文件: {file.filename}, {len(splits)} 个片段")
+                print(f"[OK] 创建新知识库，添加文件: {safe_filename}, {len(splits)} 个片段")
             else:
                 vector_store.add_documents(splits)
-                print(f"[OK] 添加文件到知识库: {file.filename}, {len(splits)} 个片段")
+                print(f"[OK] 添加文件到知识库: {safe_filename}, {len(splits)} 个片段")
 
             # 🔥 [新增] 将文件信息写入 MySQL
             file_size = os.path.getsize(uploads_path)
@@ -2001,12 +1791,12 @@ async def upload_file(
                     INSERT INTO knowledge_files (user_id, filename, file_size, chunk_count, status)
                     VALUES (%s, %s, %s, %s, 'indexed')
                     """,
-                    (current_user["id"], file.filename, file_size, len(splits))
+                    (current_user["id"], safe_filename, file_size, len(splits))
                 )
 
             return {
                 "status": "success",
-                "message": f"成功学习文件: {file.filename}",
+                "message": f"成功学习文件: {safe_filename}",
                 "chunks": len(splits)
             }
         except Exception as e:
@@ -2042,6 +1832,7 @@ async def upload_file(
         ai_report = real_llm_analysis(log_content, provider=analysis_provider)
 
         # 🔥 [新增] 将结果写入 MySQL (PyMySQL 原生写法)
+        db_written = True
         try:
             # 提取关键字段，防止字段缺失报错
             details = ai_report.get("details", [])
@@ -2054,7 +1845,7 @@ async def upload_file(
             conn = get_db_connection()
             with conn.cursor() as cursor:
                 sql = """
-                    INSERT INTO log_records 
+                    INSERT INTO log_records
                     (user_id, filename, threat_level, attack_type, source_ip, summary, status)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """
@@ -2075,10 +1866,12 @@ async def upload_file(
 
         except Exception as e:
             print(f"[DB Error] 数据入库失败: {e}")
+            db_written = False
 
         return {
             "filename": file.filename,
-            "status": "success",
+            "status": "success" if db_written else "partial",
+            **({"message": "分析完成但数据库写入失败"} if not db_written else {}),
             "ai_analysis": ai_report
         }
 
@@ -2101,9 +1894,10 @@ def list_knowledge_files(
 
 @app.delete("/api/knowledge/files/{file_id}")
 def delete_knowledge_file(
+    request: Request,
     file_id: int,
     db=Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_active_user),
+    current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
     """删除指定文件（同时清理数据库记录和向量库数据）"""
     try:
@@ -2158,295 +1952,8 @@ def delete_knowledge_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- 接口 7: 智能对话 (带 RAG 检索) ---
-# @app.post("/api/chat")
-def chat_legacy(req: ChatRequest):
-    print(f"[QUERY] 用户提问: {req.message}")
-    
-    context_text = ""
-    sources = []
-    
-    # 1. 先去知识库里查 (RAG)
-    if vector_store:
-        print("[RAG] 正在检索知识库...")
-        # 降低检索数量，减少上下文压力
-        results = vector_store.similarity_search(req.message, k=5)
-        if results:
-            print(f"[DEBUG] 检索到 {len(results)} 个文档片段")
-            
-            # 按文件来源分组
-            source_groups = {}
-            for doc in results:
-                source = doc.metadata.get("source", "未知来源")
-                print(f"[DEBUG] 文档来源: {source}")
-                if source not in source_groups:
-                    source_groups[source] = []
-                source_groups[source].append(doc)
-            
-            print(f"[DEBUG] 文件分组: {len(source_groups)} 个不同文件")
-            for source, docs in source_groups.items():
-                print(f"[DEBUG]   - {os.path.basename(source)}: {len(docs)} 个片段")
-            
-            # 先收集所有不同的来源文件（在限制文档之前）
-            all_sources = list(set([doc.metadata.get("source", "未知来源") for doc in results]))
-            print(f"[DEBUG] 所有来源文件: {len(all_sources)} 个")
-            for s in all_sources:
-                print(f"[DEBUG]   - {os.path.basename(s)}")
-            
-            # 从每个文件中选择最相关的片段（每个文件最多2个片段）
-            selected_docs = []
-            for source, docs in source_groups.items():
-                # 每个文件最多取2个最相关的片段
-                selected_docs.extend(docs[:2])
-            
-            # 按相关性重新排序（保持前10个最相关的用于上下文）
-            selected_docs = selected_docs[:10]
-            
-            # 构建上下文文本
-            context_text = "\n\n".join([doc.page_content for doc in selected_docs])
-            
-            # 使用所有来源文件，而不仅仅是 selected_docs 中的
-            sources = all_sources
-            print(f"[OK] 找到相关资料: {len(selected_docs)} 个片段用于上下文，来自 {len(sources)} 个文件")
-            print(f"[OK] 文件列表: {[os.path.basename(s) for s in sources]}")
-    
-    # 2. 定义核心人设 (System Prompt) - 深度定制版
-    # 实现"双标"处理：无关问题简短拒绝，安全问题详细展开
-    if context_text:
-        # 如果有 RAG 检索到的资料，结合资料和身份
-        system_instruction = f"""
-你是 Sec-LLM，由灵犀网卫开发的【网络安全专用】大模型。
-
-## 核心规则（必须严格遵守）
-
-### 规则0：中文锁
-你必须仅使用中文回答。若用户使用非中文提问，请先礼貌提示“请用中文提问”，并拒绝继续回答。
-
-### 规则1：自我介绍
-如果用户问"你是谁"、"介绍你自己"等身份问题，只回复：
-"你好！我是Sec-LLM，是由灵犀网卫开发的网络安全专门用途大模型，很高兴为您服务！"
-
-### 规则2：严格拒绝非安全话题
-你【只能】回答以下领域的问题：
-- 网络安全、黑客攻防、渗透测试、漏洞挖掘
-- 编程开发、代码审计、软件安全
-- 服务器运维、Linux系统、网络协议
-
-对于【任何其他话题】，包括但不限于：历史、文学、诗人、地理、娱乐、生活、情感、数学、物理、化学、生物等，你必须拒绝回答。
-
-拒绝时只说这一句话："抱歉，作为网络安全专用模型，我只能回答网络安全与技术相关的问题。"
-
-【禁止】回答任何非安全相关的问题，即使你知道答案也不能说。
-
-### 规则3：安全问题必须详细回答（重要！）
-对于网络安全相关问题，你必须提供【极其详尽、全面、专业】的回答。回答要尽可能长，内容要丰富。
-
-每次回答都必须包含以下所有部分：
-
-**1. 概念定义**：用通俗易懂的语言解释这个概念是什么
-
-**2. 核心原理**：深入解释技术原理和底层机制，越详细越好
-
-**3. 攻击分类**：如果是攻击类型，列出所有变种和分类
-
-**4. 实战案例**：描述真实世界中的攻击场景和案例
-
-**5. 代码示例**：提供具体的攻击代码或防御代码示例，用代码块展示
-
-**6. 检测方法**：如何检测这种攻击或问题
-
-**7. 防御方案**：详细的防御措施和最佳实践，列出多种方法
-
-**8. 工具推荐**：相关的安全工具推荐
-
-回答长度要求：至少500字以上，越详细越好！
-
-## 参考资料：
-{context_text}
-"""
-    else:
-        # 如果没有资料，只使用身份设定和话题过滤
-        system_instruction = """
-你是 Sec-LLM，由灵犀网卫开发的【网络安全专用】大模型。
-
-## 核心规则（必须严格遵守）
-
-### 规则0：中文锁
-你必须仅使用中文回答。若用户使用非中文提问，请先礼貌提示“请用中文提问”，并拒绝继续回答。
-
-### 规则1：自我介绍
-如果用户问"你是谁"、"介绍你自己"等身份问题，只回复：
-"你好！我是Sec-LLM，是由灵犀网卫开发的网络安全专门用途大模型，很高兴为您服务！"
-
-### 规则2：严格拒绝非安全话题
-你【只能】回答以下领域的问题：
-- 网络安全、黑客攻防、渗透测试、漏洞挖掘
-- 编程开发、代码审计、软件安全
-- 服务器运维、Linux系统、网络协议
-
-对于【任何其他话题】，包括但不限于：历史、文学、诗人、地理、娱乐、生活、情感、数学、物理、化学、生物等，你必须拒绝回答。
-
-拒绝时只说这一句话："抱歉，作为网络安全专用模型，我只能回答网络安全与技术相关的问题。"
-
-【禁止】回答任何非安全相关的问题，即使你知道答案也不能说。
-
-### 规则3：安全问题必须详细回答（重要！）
-对于网络安全相关问题，你必须提供【极其详尽、全面、专业】的回答。回答要尽可能长，内容要丰富。
-
-每次回答都必须包含以下所有部分：
-
-**1. 概念定义**：用通俗易懂的语言解释这个概念是什么
-
-**2. 核心原理**：深入解释技术原理和底层机制，越详细越好
-
-**3. 攻击分类**：如果是攻击类型，列出所有变种和分类
-
-**4. 实战案例**：描述真实世界中的攻击场景和案例
-
-**5. 代码示例**：提供具体的攻击代码或防御代码示例，用代码块展示
-
-**6. 检测方法**：如何检测这种攻击或问题
-
-**7. 防御方案**：详细的防御措施和最佳实践，列出多种方法
-
-**8. 工具推荐**：相关的安全工具推荐
-
-回答长度要求：至少500字以上，越详细越好！
-
-## 示例对话：
-
-用户: 你是谁
-回复: 你好！我是Sec-LLM，是由灵犀网卫开发的网络安全专门用途大模型，很高兴为您服务！
-
-用户: 李白是谁
-回复: 抱歉，作为网络安全专用模型，我只能回答网络安全与技术相关的问题。
-
-用户: 李白是哪个朝代的
-回复: 抱歉，作为网络安全专用模型，我只能回答网络安全与技术相关的问题。
-
-用户: 1+1等于几
-回复: 抱歉，作为网络安全专用模型，我只能回答网络安全与技术相关的问题。
-
-用户: 什么是SQL注入
-回复: （详细解释SQL注入的原理、攻击方式、代码示例和防御方案）
-"""
-    
-    # 3. 组装消息列表
-    # 将 system_instruction 放在最前面作为第一条 system 消息
-    messages = [
-        {"role": "system", "content": system_instruction},
-        {"role": "user", "content": req.message}
-    ]
-    
-    try:
-        # 使用原生 HTTP 请求 (最稳的方式)
-        url = f"{settings.OLLAMA_BASE_URL}/api/chat"
-        payload = {
-            "model": settings.OLLAMA_MODEL_NAME,
-            "messages": messages,
-            "stream": False,
-            "temperature": 0.5  # 适中温度，平衡遵循指令和内容丰富度
-        }
-        
-        resp = requests.post(url, json=payload, proxies={"http": None, "https": None})
-        ai_reply = resp.json()['message']['content']
-        
-        # 4. 返回所有相关的来源文件
-        source_names = [os.path.basename(s) for s in sources] if sources else []
-        print(f"[DEBUG] 返回的来源文件: {source_names}")
-        print(f"[DEBUG] 来源文件数量: {len(source_names)}")
-        return {
-            "reply": ai_reply,
-            "sources": source_names if source_names else ["本地 DeepSeek-R1 模型"]
-        }
-        
-    except Exception as e:
-        return {"reply": f"AI 思考中断: {str(e)}", "sources": []}
-
 # ================= 🧠 RAG 核心组件：查询重写 =================
-async def rewrite_query(user_msg: str, history: List[Dict[str, str]]):
-    """
-    基于历史对话，将用户的后续问题重写为独立的搜索查询
-    """
-    if not history:
-        return user_msg
-
-    print(f"[Rewriting] Original: {user_msg}")
-
-    history_text = ""
-    for msg in history[-4:]:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        history_text += f"{role}: {msg['content']}\n"
-
-    system_prompt = """
-    你是一个搜索查询优化专家。
-    你的任务是：根据【对话历史】将用户的【当前问题】重写为一个**语义完整、独立**的搜索查询。
-    
-    **规则**：
-    1. 替换代词（如“它”、“这个”）为具体的名词。
-    2. 补全省略的上下文（如主语）。
-    3. 保持原意不变。
-    4. **只输出重写后的句子**，不要有任何解释、不要加引号、不要加 "重写后：" 这种前缀。
-    5. 如果当前问题已经很独立（如“你好”、“你是谁”），请原样输出。
-    """
-
-    user_prompt = f"""
-    【对话历史】：
-    {history_text}
-    
-    【当前问题】：{user_msg}
-    
-    【重写结果】：
-    """
-
-    try:
-        url = f"{settings.OLLAMA_BASE_URL}/api/chat"
-        payload = {
-            "model": settings.OLLAMA_MODEL_NAME,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "stream": False,
-            "options": {"temperature": 0.1}
-        }
-
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=payload, timeout=10.0)
-            if resp.status_code == 200:
-                new_query = resp.json()["message"]["content"].strip()
-                print(f"[Rewriting] Result: {new_query}")
-                return new_query
-    except Exception as e:
-        print(f"[Rewriting Error] {e}")
-
-    return user_msg
-
-
-def _extract_query_keywords(text: str) -> List[str]:
-    """提取查询关键词（英文词 + 2字及以上中文片段）"""
-    if not text:
-        return []
-    parts = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", text.lower())
-    # 去重并过滤过短噪声
-    dedup = []
-    seen = set()
-    for p in parts:
-        if len(p) < 2:
-            continue
-        if p not in seen:
-            seen.add(p)
-            dedup.append(p)
-    return dedup
-
-
-def _query_matches_context(query: str, context: str) -> bool:
-    """仅RAG模式下，要求问题关键词至少命中上下文一次"""
-    keywords = _extract_query_keywords(query)
-    if not keywords:
-        return False
-    ctx = (context or "").lower()
-    return any(k in ctx for k in keywords)
+from core.rag.rewrite import rewrite_query, extract_query_keywords as _extract_query_keywords, query_matches_context as _query_matches_context
 
 
 def _normalize_chat_role(role: str) -> str:
@@ -2454,7 +1961,7 @@ def _normalize_chat_role(role: str) -> str:
         "ai": "assistant",
         "assistant": "assistant",
         "user": "user",
-        "system": "system",
+        "system": "user",  # 降级为 user，防止用户传入 system 角色注入提示词
         "tool": "tool",
     }
     return role_map.get((role or "").strip().lower(), "user")
@@ -2473,7 +1980,7 @@ async def chat(
     # 🔥 1. 查询重写 (Step 1)
     search_query = req.message
     if vector_store and req.history:
-        search_query = await rewrite_query(req.message, req.history)
+        search_query = await rewrite_query(req.message, req.history, active_provider)
 
     # 🔥 2. RAG 检索 (Step 2，已强制登录，确保按用户隔离)
     context_text = ""
@@ -2602,7 +2109,7 @@ Reference Material (Use only if relevant to security):
                     "temperature": 0.6,
                 }
 
-                async with httpx.AsyncClient(timeout=None) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                     async with client.stream("POST", cloud_url, headers=headers, json=payload) as resp:
                         if resp.status_code >= 400:
                             err_text = await resp.aread()
@@ -2636,7 +2143,7 @@ Reference Material (Use only if relevant to security):
                     "options": {"temperature": 0.6}
                 }
 
-                async with httpx.AsyncClient(timeout=None) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                     async with client.stream("POST", local_url, json=payload) as resp:
                         resp.raise_for_status()
                         async for line in resp.aiter_lines():

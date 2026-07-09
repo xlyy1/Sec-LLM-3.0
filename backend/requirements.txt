@@ -35,3 +35,11 @@ bcrypt==4.0.1
 pymysql>=1.1.0
 fastapi-mail>=1.5.8
 email-validator>=2.3.0
+# Agent platform dependencies
+langgraph>=0.2.0
+langgraph-checkpoint>=1.0.0
+playwright>=1.48.0
+docker>=7.0.0
+typer>=0.15.0
+rich>=13.0.0
+PyGithub>=2.5.0
