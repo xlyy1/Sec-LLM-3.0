@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Home,
@@ -40,6 +40,11 @@ interface Message {
   content: string;
   sources?: string[];
 }
+
+const buildHistoryTitle = (text: string) => {
+  const trimmed = text.trim();
+  return trimmed.length > 10 ? trimmed.slice(0, 10) : trimmed || '新对话';
+};
 
 export default function ChatPage() {
   const router = useRouter();
@@ -109,7 +114,14 @@ export default function ChatPage() {
     messagesRef.current = messages;
   }, [messages]);
 
-  const loadChatHistories = async (token: string) => {
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    setShowUserMenu(false);
+    router.push('/login');
+  }, [router]);
+
+  const loadChatHistories = useCallback(async (token: string) => {
     try {
       setHistoryError(null);
       const response = await getChatHistories(token, 50, 0);
@@ -142,13 +154,13 @@ export default function ChatPage() {
       }
       setHistoryError(error?.response?.data?.detail || '历史记录加载失败');
     }
-  };
+  }, [handleLogout]);
 
   useEffect(() => {
     if (authToken) {
       loadChatHistories(authToken);
     }
-  }, [authToken]);
+  }, [authToken, loadChatHistories]);
 
 
   // 自动保存聊天记录到 localStorage
@@ -172,11 +184,6 @@ export default function ChatPage() {
       .replace(/\n?\s*>?\s*(?:📚\s*)?(?:\*\*)?参考(?:来源|资料)(?:\*\*)?:[\s\S]*/g, '')
       .replace(/\n?>\s*$/g, '')
       .trimEnd();
-
-  const buildHistoryTitle = (text: string) => {
-    const trimmed = text.trim();
-    return trimmed.length > 10 ? trimmed.slice(0, 10) : trimmed || '新对话';
-  };
 
   const handleSelectHistory = (history: ChatHistory) => {
     setSelectedHistoryId(history.id);
@@ -263,13 +270,6 @@ export default function ChatPage() {
     } catch (error) {
       setKnowledgeError('删除失败');
     }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    setShowUserMenu(false);
-    router.push('/login');
   };
 
   // 点击外部关闭用户菜单

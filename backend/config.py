@@ -24,12 +24,6 @@ class Settings(BaseSettings):
     OTX_API_KEY: Optional[str] = None
     THREAT_INTEL_TIMEOUT_SECONDS: float = 4.0
 
-    # TypeSafe Jev tool guard (enabled when an API key is configured)
-    TYPESAFE_API_KEY: Optional[str] = None
-    TYPESAFE_BASE_URL: str = "https://api.typesafe.ai"
-    TYPESAFE_MODEL: str = "jev-latest"
-    JEV_MIN_CONFIDENCE: float = 0.8
-
     # Local Ollama
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OLLAMA_MODEL_NAME: str = "llama3:8b"

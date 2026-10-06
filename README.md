@@ -194,11 +194,6 @@ DEEPSEEK_MODEL_NAME=deepseek-chat
 ABUSEIPDB_API_KEY=...       # 可选
 OTX_API_KEY=...              # 可选
 
-# TypeSafe Jev（shell_exec 和 browser_check_xss 必需；未配置时高风险调用默认阻止）
-TYPESAFE_API_KEY=...
-TYPESAFE_BASE_URL=https://api.typesafe.ai
-TYPESAFE_MODEL=jev-latest
-JEV_MIN_CONFIDENCE=0.8
 AGENT_MAX_CONCURRENT=4
 AGENT_TASK_TIMEOUT_SECONDS=1800
 
