@@ -71,6 +71,8 @@ async def run_agent_task(
             status="running",
             message=f"Agent task started. Track with /api/agent/{session_id}/status",
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

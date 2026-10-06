@@ -65,6 +65,60 @@ class TestSessionManagement:
         import agents.orchestrator as orch
         orch._sessions.clear()
 
+    def test_production_scan_scope_is_explicit(self, monkeypatch):
+        import agents.orchestrator as orch
+        monkeypatch.setattr(orch.settings, "ENV_MODE", "prod")
+        monkeypatch.setattr(orch.settings, "AGENT_ALLOWED_TARGETS", "")
+        with pytest.raises(ValueError, match="AGENT_ALLOWED_TARGETS"):
+            orch._validate_task({"target": "https://example.com", "task_type": "web_scan"})
+        monkeypatch.setattr(orch.settings, "AGENT_ALLOWED_TARGETS", "example.com")
+        assert orch._validate_task({"target": "https://EXAMPLE.com/path", "task_type": "web_scan"})
+        with pytest.raises(ValueError, match="outside"):
+            orch._validate_task({"target": "https://other.example/path", "task_type": "web_scan"})
+        with pytest.raises(ValueError, match="credentials"):
+            orch._validate_task({"target": "https://user:pass@example.com", "task_type": "web_scan"})
+
+    def test_heartbeat_stops_worker_after_remote_cancel(self, monkeypatch):
+        import agents.orchestrator as orch
+        queries = []
+
+        class Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def execute(self, sql, params):
+                queries.append((sql, params))
+                return 0
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def cursor(self):
+                return Cursor()
+
+        class Owner:
+            cancelled = False
+
+            def cancel(self):
+                self.cancelled = True
+
+        async def no_wait(seconds):
+            assert seconds == 30
+
+        monkeypatch.setattr(orch, "_db_connection", Connection)
+        monkeypatch.setattr(orch.asyncio, "sleep", no_wait)
+        owner = Owner()
+        asyncio.run(orch._heartbeat_session("test1234", owner))
+        assert owner.cancelled
+        assert queries[0][1] == ("test1234",)
+
     def test_create_and_get(self, monkeypatch):
         import agents.orchestrator as orch
         monkeypatch.setattr(orch, "_persist_session", lambda session_id: None)
@@ -120,6 +174,7 @@ class TestSessionManagement:
         monkeypatch.setattr(orch, "run_multi_agent", specialists)
         monkeypatch.setattr(orch, "get_agent_graph", lambda: GeneralGraph())
         monkeypatch.setattr(orch, "_persist_session", lambda session_id: persisted.append(orch._sessions[session_id]["status"]))
+        monkeypatch.setattr(orch, "_claim_session", lambda session_id, recovered=False: True)
 
         async def run():
             web_id = await orch.run_agent({"target": "http://example.com", "task_type": "web_scan"}, user_id=1)

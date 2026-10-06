@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     AGENT_MAX_CONCURRENT: int = 4
     AGENT_BROWSER_HEADLESS: bool = True
     AGENT_DEFAULT_SCAN_MODE: str = "standard"  # standard | deep | quick
+    AGENT_ALLOWED_TARGETS: str = ""  # comma-separated exact hostnames/IPs; required for production web scans
 
 settings = Settings()
 

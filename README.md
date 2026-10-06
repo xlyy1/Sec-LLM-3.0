@@ -209,6 +209,7 @@ MYSQL_DB=sec_llm_db
 AGENT_MAX_STEPS=20
 AGENT_STEP_TIMEOUT_SECONDS=300
 AGENT_SANDBOX_IMAGE=sec-llm-sandbox:latest
+AGENT_ALLOWED_TARGETS=example.com,192.0.2.10  # 生产环境扫描目标，精确匹配主机名/IP
 
 # 邮件（可选，用于注册验证）
 MAIL_USERNAME=...           # 可选
@@ -276,7 +277,7 @@ python tui.py
 
 `task_type=web_scan` 使用侦察→检测→报告的多 Agent 图；`code_audit`、`threat_intel`、`comprehensive` 保留规划→执行图。两条路径共用同一会话、状态和报告接口。POST 创建会话后立即返回，任务在后台执行；进度查询中的 `steps_*` 分别表示多 Agent 阶段数或规划工具步数。
 
-Agent 会话依赖 MySQL：创建任务和每个图节点完成后同步保存状态、日志与发现，`agent_sessions.findings` 是发现项的唯一运行时数据源。数据库不可用时任务不会以“已保存”继续执行。服务启动时会恢复超时后仍未开始的排队任务；多个 Worker 通过 MySQL 条件更新原子认领，同一任务只有一个 Worker 执行。已进入执行阶段的中断任务标记为失败，绝不重放安全工具。同 Worker 的 SSE 由状态事件唤醒，跨 Worker 的 SSE 每秒读取 MySQL；跨 Worker 取消在执行进程的下一个持久化点生效。现有数据库需先执行 `alembic upgrade head`，或由应用启动时的 `init_db` 补齐字段。
+Agent 会话依赖 MySQL：创建任务和每个图节点完成后同步保存状态、日志与发现，`agent_sessions.findings` 是发现项的唯一运行时数据源。数据库不可用时任务不会以“已保存”继续执行。多个 Worker 通过 MySQL 条件更新原子认领排队任务；运行中每 30 秒刷新心跳，只有超过任务超时仍无心跳的中断任务才会标记失败，不重放安全工具。同 Worker 的 SSE 由状态事件唤醒，跨 Worker 的 SSE 每秒读取 MySQL；跨 Worker 取消最迟由下一次心跳发现并中止任务。现有数据库需先执行 `alembic upgrade head`，或由应用启动时的 `init_db` 补齐字段。
 
 真实基础设施检查默认跳过；配置好本机 MySQL、Docker 和 Playwright 后运行：`RUN_AGENT_INTEGRATION=1 pytest backend/tests/test_agent_integration.py`。双进程用例验证跨 Worker 日志流、取消和唯一认领，并清理测试会话。
 
@@ -402,6 +403,7 @@ tests/test_agent_supervisor.py ......  10 passed
 - 不要将 API Key 提交到代码仓库
 - 建议使用专用 MySQL 账号并限制权限
 - Docker 沙箱对网络扫描工具使用 bridge 网络，对离线代码扫描工具禁用网络；均限制内存/CPU 并使用只读根文件系统
+- 生产环境的 web_scan/comprehensive 任务要求配置 `AGENT_ALLOWED_TARGETS`；这是提交入口的范围控制，不是网络层隔离。实际部署仍须使用网络策略限制浏览器与 Docker 沙箱的出站地址，防止重定向、DNS 变化或 Agent 工具参数越界。
 
 ---
 

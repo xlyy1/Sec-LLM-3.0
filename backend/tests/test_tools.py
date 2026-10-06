@@ -164,6 +164,51 @@ class TestShellExec:
         assert run_process.killed
         assert result["exit_code"] == -1
 
+    def test_cancel_removes_own_container(self, monkeypatch):
+        import asyncio
+        from tools.shell import shell_exec
+
+        calls = []
+        started = asyncio.Event()
+
+        class RunProcess:
+            returncode = None
+
+            async def communicate(self):
+                started.set()
+                await asyncio.Future()
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        class CleanupProcess:
+            async def wait(self):
+                return 0
+
+        async def fake_exec(*args, **kwargs):
+            calls.append(args)
+            return RunProcess() if args[1] == "run" else CleanupProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+        async def check():
+            task = asyncio.create_task(shell_exec("nmap -sV 127.0.0.1"))
+            await started.wait()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:
+                assert False, "cancellation was swallowed"
+
+        asyncio.run(check())
+        name = calls[0][calls[0].index("--name") + 1]
+        assert calls[1] == ("docker", "rm", "-f", name)
+
 
 class TestBrowserTool:
     def test_tool_exists(self):

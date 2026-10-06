@@ -6,6 +6,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from langgraph.graph import END, StateGraph
 
@@ -451,6 +452,19 @@ def _validate_task(task: AgentTask) -> str:
     target = task.get("target", "")
     if not target:
         raise ValueError("Task must include a 'target' field")
+    if task.get("task_type", "web_scan") in {"web_scan", "comprehensive"}:
+        try:
+            parsed = urlsplit(target if "://" in target else f"//{target}")
+            hostname = (parsed.hostname or "").lower().rstrip(".")
+        except ValueError as error:
+            raise ValueError("Invalid scan target") from error
+        if not hostname or parsed.username or parsed.password:
+            raise ValueError("Scan target must be a hostname, IP, or URL without credentials")
+        allowed = {item.strip().lower().rstrip(".") for item in settings.AGENT_ALLOWED_TARGETS.split(",") if item.strip()}
+        if settings.ENV_MODE.lower() in {"prod", "production"} and not allowed:
+            raise ValueError("AGENT_ALLOWED_TARGETS must be configured for production scans")
+        if allowed and hostname not in allowed:
+            raise ValueError("Scan target is outside AGENT_ALLOWED_TARGETS")
     return target
 
 
@@ -510,25 +524,49 @@ async def _execute_agent(session_id: str, task: AgentTask) -> None:
 
 
 
-def _claim_recovered_session(session_id: str) -> bool:
-    """Atomically claim an old, never-started session before invoking any tool."""
+def _claim_session(session_id: str, recovered: bool = False) -> bool:
+    """Atomically claim a queued session before invoking any tool."""
     with _db_connection() as conn:
         with conn.cursor() as cursor:
             return bool(cursor.execute(
                 """UPDATE agent_sessions SET phase='claimed'
-                   WHERE id=%s AND status='running' AND (phase IS NULL OR phase='')
-                   AND TIMESTAMPDIFF(SECOND, updated_at, NOW()) > %s""",
-                (session_id, settings.AGENT_TASK_TIMEOUT_SECONDS + 30),
+                   WHERE id=%s AND status='running' AND (phase IS NULL OR phase='')"""
+                + (" AND TIMESTAMPDIFF(SECOND, updated_at, NOW()) > %s" if recovered else ""),
+                (session_id, settings.AGENT_TASK_TIMEOUT_SECONDS + 30) if recovered else (session_id,),
             ))
 
 
+async def _heartbeat_session(session_id: str, owner: asyncio.Task) -> None:
+    """Keep the database lease fresh even while a tool or LLM call is running."""
+    while True:
+        await asyncio.sleep(30)
+        def touch() -> bool:
+            with _db_connection() as conn:
+                with conn.cursor() as cursor:
+                    return bool(cursor.execute(
+                        "UPDATE agent_sessions SET updated_at=NOW() WHERE id=%s AND status='running'",
+                        (session_id,),
+                    ))
+        try:
+            active = await asyncio.to_thread(touch)
+        except Exception as error:
+            print(f"[Agent] Heartbeat failed for {session_id}: {error}")
+            owner.cancel()
+            return
+        if not active:
+            owner.cancel()
+            return
+
+
 async def _run_limited(session_id: str, task: AgentTask, recovered: bool = False) -> None:
+    heartbeat = None
     try:
         async with _agent_slots:
-            if recovered and not await asyncio.to_thread(_claim_recovered_session, session_id):
+            if not await asyncio.to_thread(_claim_session, session_id, recovered):
                 _sessions.pop(session_id, None)
                 _session_events.pop(session_id, None)
                 return
+            heartbeat = asyncio.create_task(_heartbeat_session(session_id, asyncio.current_task()))
             current = _sessions[session_id]
             await _store_progress(session_id, {
                 **(current.get("state") or {}), "phase": "starting", "status": "running",
@@ -550,6 +588,13 @@ async def _run_limited(session_id: str, task: AgentTask, recovered: bool = False
             "logs": _sessions[session_id]["logs"] + ["[CANCELLED] Task cancelled by user"],
         })
         raise
+    finally:
+        if heartbeat is not None:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
 
 
 async def run_agent(task: AgentTask, user_id: int | None = None) -> str:

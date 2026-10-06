@@ -42,6 +42,7 @@ async def shell_exec(command: str, timeout: int = 300) -> dict:
         "--security-opt", "no-new-privileges",
         "--read-only",
         "--tmpfs", "/tmp:rw,noexec",
+        "--env", "HOME=/tmp",
         sandbox_image,
         *args,
     ]
@@ -60,7 +61,7 @@ async def shell_exec(command: str, timeout: int = 300) -> dict:
             "stderr": stderr.decode("utf-8", errors="replace")[:10000],
             "exit_code": proc.returncode or 0,
         }
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as error:
         cleanup_error = ""
         try:
             cleanup = await asyncio.create_subprocess_exec(
@@ -78,6 +79,8 @@ async def shell_exec(command: str, timeout: int = 300) -> dict:
             except ProcessLookupError:
                 pass
             await proc.wait()
+        if isinstance(error, asyncio.CancelledError):
+            raise
         return {"stdout": "", "stderr": f"Command timed out after {effective_timeout}s{cleanup_error}", "exit_code": -1}
     except FileNotFoundError:
         return {"stdout": "", "stderr": "Docker is not available on this system", "exit_code": -1}
