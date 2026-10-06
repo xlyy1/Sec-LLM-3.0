@@ -26,6 +26,19 @@ class TestBlackboard:
         assert bb.get_by_source("recon") == {"x": 10}
         assert bb.get_by_source("exploit") == {"y": 20}
 
+    def test_shared_keys_keep_owner_and_snapshot(self):
+        bb = Blackboard()
+        value = ["first"]
+        bb.publish("endpoints", value, "recon")
+        value.append("later")
+        bb.get("endpoints").append("outside")
+        assert bb.get("endpoints") == ["first"]
+        with pytest.raises(ValueError):
+            bb.publish("endpoints", ["overwritten"], "exploit")
+        bb.publish("endpoints", ["updated"], "recon")
+        assert bb.get_by_source("recon") == {"endpoints": ["updated"]}
+        assert bb.get_history()[0]["value"] == ["first"]
+
     def test_history(self):
         bb = Blackboard()
         bb.publish("k", "v", "src")
@@ -57,6 +70,53 @@ class TestReconSpecialist:
 
 
 class TestExploitSpecialist:
+    def test_tool_failures_are_reported(self, monkeypatch):
+        import asyncio
+        import agents.specialists.exploit as specialist
+
+        async def fail(*args, **kwargs):
+            raise RuntimeError("tool unavailable")
+
+        monkeypatch.setattr(specialist, "invoke_tool", fail)
+        result = asyncio.run(run_exploit(
+            "http://example.com", "local", Blackboard(),
+            {"forms": [{"action": "/", "inputs": [{"name": "q", "type": "text"}]}]},
+        ))
+        assert {item["tool"] for item in result["errors"]} == {"browser_check_xss", "code_auditor"}
+
+    def test_missing_payload_cannot_be_verified(self):
+        from agents.reporting import annotate_finding
+        result = {"results": [{"dialog_triggered": True}]}
+        assert annotate_finding({"title": "XSS"}, "browser_check_xss", result)["verification_status"] == "unverified"
+
+    def test_only_observed_execution_is_verified(self, monkeypatch):
+        import asyncio
+        import agents.specialists.exploit as specialist
+
+        async def tool(name, **kwargs):
+            if name == "browser_check_xss":
+                return {
+                    "url": kwargs["url"], "parameter": kwargs["param"],
+                    "findings": [
+                        {"title": "XSS", "evidence": "executed"},
+                        {"title": "XSS", "evidence": "reflected"},
+                    ],
+                    "results": [
+                        {"payload": "executed", "dialog_triggered": True, "url": "http://example.com/?q=executed"},
+                        {"payload": "reflected", "dialog_triggered": False},
+                    ],
+                }
+            return {"findings": [{"title": "SQL injection hypothesis"}]}
+
+        monkeypatch.setattr(specialist, "invoke_tool", tool)
+        bb = Blackboard()
+        discoveries = {"forms": [{"action": "/", "inputs": [{"name": "q", "type": "text"}]}]}
+        asyncio.run(run_exploit("http://example.com", "local", bb, discoveries))
+        findings = bb.get("all_findings")
+        assert [f["verification_status"] for f in findings] == ["verified", "unverified", "unverified"]
+        assert findings[0]["reproduction"]["observed"] == "browser_dialog_triggered"
+        assert "reproduction" not in findings[1]
+
     def test_run_exploit_empty_blackboard(self):
         """Exploit should handle empty blackboard gracefully."""
         import asyncio
@@ -67,6 +127,43 @@ class TestExploitSpecialist:
 
 
 class TestSupervisor:
+    def test_graph_hands_recon_output_to_exploit(self, monkeypatch):
+        import asyncio
+        import agents.supervisor as supervisor
+
+        async def recon(target, provider, blackboard):
+            blackboard.publish("forms", [{"action": "/search", "inputs": []}], "recon")
+            return {"phase": "recon_complete"}
+
+        async def exploit(target, provider, blackboard, discoveries):
+            assert discoveries["forms"][0]["action"] == "/search"
+            blackboard.publish("all_findings", [{"title": "sample"}], "exploit")
+            return {"phase": "exploit_complete", "findings_count": 1}
+
+        async def report(*args, **kwargs):
+            return "sample report"
+
+        monkeypatch.setattr(supervisor, "run_recon", recon)
+        monkeypatch.setattr(supervisor, "run_exploit", exploit)
+        monkeypatch.setattr(supervisor, "single_shot_completion", report)
+        result = asyncio.run(supervisor._graph.ainvoke({
+            "target": "example.com", "task_type": "web_scan", "provider": "local",
+            "blackboard": Blackboard(), "recon_state": {}, "exploit_state": {},
+            "report_state": {}, "logs": [],
+        }))
+        assert result["exploit_state"]["findings_count"] == 1
+        assert result["report_state"]["report"] == "sample report"
+
+        progress = []
+
+        async def collect(snapshot):
+            progress.append(snapshot)
+
+        output = asyncio.run(supervisor.run_multi_agent("example.com", "web_scan", "local", collect))
+        assert output["report"] == "sample report"
+        assert [item["steps_completed"] for item in progress] == [0, 1, 2, 3]
+        assert progress[-1]["status"] == "completed"
+
     def test_run_supervisor_basic(self):
         """Supervisor should complete multi-agent run without crashing."""
         import asyncio

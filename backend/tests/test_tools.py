@@ -93,6 +93,77 @@ class TestShellExec:
         # Either succeeds (Docker available) or returns error about Docker
         assert "exit_code" in result
 
+    def test_shell_metacharacters_are_rejected(self, monkeypatch):
+        import asyncio
+        from tools.shell import shell_exec
+
+        calls = []
+
+        class Process:
+            returncode = 0
+
+            async def communicate(self):
+                return b"", b""
+
+        async def fake_exec(*args, **kwargs):
+            calls.append(args)
+            return Process()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        result = asyncio.run(shell_exec("nmap -sV 127.0.0.1; echo injected"))
+        assert result["exit_code"] == -1
+        assert not calls
+
+        result = asyncio.run(shell_exec("nmap -sV 127.0.0.1"))
+        assert result["exit_code"] == 0
+        assert len(calls) == 1
+        assert calls[0][-3:] == ("nmap", "-sV", "127.0.0.1")
+        assert "sh" not in calls[0]
+        assert "--privileged" not in calls[0]
+        assert calls[0][calls[0].index("--network") + 1] == "bridge"
+
+        calls.clear()
+        result = asyncio.run(shell_exec("bandit -r /tmp"))
+        assert result["exit_code"] == 0
+        assert calls[0][calls[0].index("--network") + 1] == "none"
+
+    def test_timeout_removes_own_container(self, monkeypatch):
+        import asyncio
+        from tools.shell import shell_exec
+
+        calls = []
+
+        class RunProcess:
+            returncode = None
+            killed = False
+
+            async def communicate(self):
+                raise asyncio.TimeoutError
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        class CleanupProcess:
+            async def wait(self):
+                return 0
+
+        run_process = RunProcess()
+
+        async def fake_exec(*args, **kwargs):
+            calls.append(args)
+            return run_process if args[1] == "run" else CleanupProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        result = asyncio.run(shell_exec("nmap -sV 127.0.0.1", timeout=1))
+        name = calls[0][calls[0].index("--name") + 1]
+        assert calls[1] == ("docker", "rm", "-f", name)
+        assert run_process.killed
+        assert result["exit_code"] == -1
+
 
 class TestBrowserTool:
     def test_tool_exists(self):

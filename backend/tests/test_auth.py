@@ -1,7 +1,7 @@
 """Tests for the auth module."""
 import pytest
 from core.auth.password import verify_password, get_password_hash
-from core.auth.jwt import create_access_token
+from core.auth.jwt import create_access_token, get_current_user
 
 
 class TestPasswordHashing:
@@ -30,3 +30,26 @@ class TestJwt:
         from datetime import timedelta
         token = create_access_token({"sub": "testuser"}, expires_delta=timedelta(hours=1))
         assert token is not None
+
+    def test_disabled_user_token_is_rejected(self):
+        import asyncio
+
+        class Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+            def execute(self, *_):
+                pass
+
+            def fetchone(self):
+                return {"username": "disabled", "is_active": False}
+
+        class DB:
+            def cursor(self):
+                return Cursor()
+
+        token = create_access_token({"sub": "disabled"})
+        assert asyncio.run(get_current_user(token, DB())) is None

@@ -57,14 +57,15 @@ async def get_current_user_or_skill(
         with db.cursor() as cursor:
             cursor.execute("SELECT * FROM users WHERE username=%s", ("admin",))
             admin_user = cursor.fetchone()
-        if admin_user:
+        if admin_user and admin_user.get("is_active"):
             print(f"[AUTH] Skill API Key authenticated as admin (user_id={admin_user['id']})")
             return admin_user
-        else:
+        elif not admin_user:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Skill API Key configured but admin account does not exist",
             )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account is disabled")
     user = await get_current_user(token, db)
     if user is None:
         raise HTTPException(

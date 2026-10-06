@@ -1,6 +1,30 @@
 """CVSS 3.1 calculator and OWASP classifier for agent findings."""
 import math
 
+
+def annotate_finding(finding: dict, tool: str, result: dict) -> dict:
+    """Only observed browser execution counts as verified; model claims are leads."""
+    annotated = {
+        **finding,
+        "source_tool": tool,
+        "verification_status": "unverified",
+        "verification_reason": "No independent execution evidence",
+    }
+    if tool == "browser_check_xss":
+        evidence = finding.get("evidence")
+        match = next((item for item in result.get("results", [])
+                      if evidence and item.get("payload") == evidence and item.get("dialog_triggered") is True), None)
+        if match:
+            annotated["verification_status"] = "verified"
+            annotated["verification_reason"] = "Browser dialog observed for matching payload"
+            annotated["reproduction"] = {
+                "url": match.get("url", result.get("url")),
+                "parameter": result.get("parameter"),
+                "payload": evidence,
+                "observed": "browser_dialog_triggered",
+            }
+    return annotated
+
 # OWASP Top 10 (2021) mapping by keyword
 OWASP_CATEGORIES = {
     "sql injection": ("A03:2021 - Injection", "CWE-89"),

@@ -56,8 +56,10 @@ async def run_recon(target: str, provider: str, blackboard: Blackboard) -> Dict[
         if isinstance(result, dict) and result.get("exit_code") == 0:
             blackboard.publish("nmap_output", result.get("stdout", ""), "recon")
             findings.append({"type": "port_scan", "output": result.get("stdout", "")[:2000]})
-    except Exception:
-        pass  # Docker sandbox may not be available
+        else:
+            findings.append({"type": "error", "tool": "shell_exec", "error": str(result.get("stderr", "Port scan failed"))[:1000] if isinstance(result, dict) else "Port scan returned no result"})
+    except Exception as e:
+        findings.append({"type": "error", "tool": "shell_exec", "error": str(e)})
 
     # Step 3: LLM synthesis
     try:

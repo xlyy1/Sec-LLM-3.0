@@ -43,4 +43,5 @@ async def get_current_user(
         return None
     with db.cursor() as cursor:
         cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
-        return cursor.fetchone()
+        user = cursor.fetchone()
+        return user if user and user.get("is_active") else None

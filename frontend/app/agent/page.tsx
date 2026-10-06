@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Shield, Activity } from "lucide-react";
 import AgentTaskPanel from "@/components/AgentTaskPanel";
 import AgentLogStream from "@/components/AgentLogStream";
-import { getAgentReport, listAgentSessions } from "@/lib/agent-api";
+import { createAgentStream, getAgentReport, getAgentStatus, listAgentSessions } from "@/lib/agent-api";
 
 export default function AgentPage() {
   const router = useRouter();
@@ -24,8 +24,54 @@ export default function AgentPage() {
       return;
     }
     setIsAuth(true);
-    refreshSessions();
+    listAgentSessions().then((data) => {
+      const recent = data.sessions || [];
+      setSessions(recent);
+      const saved = sessionStorage.getItem("agent_session_id");
+      const selected = recent.find((session) => session.id === saved) || recent.find((session) => session.status === "running");
+      if (selected) setSessionId(selected.id);
+    }).catch(() => {});
   }, [router]);
+
+  useEffect(() => {
+    if (!isAuth || !sessionId) return;
+    sessionStorage.setItem("agent_session_id", sessionId);
+    let active = true;
+    let stream: AbortController | null = null;
+    setLogs([]);
+    setReport(null);
+    getAgentStatus(sessionId).then(async (data) => {
+      if (!active) return;
+      setStatus(data.status);
+      setFindingsCount(data.findings_count);
+      if (data.status === "running") {
+        stream = createAgentStream(
+          sessionId,
+          (message) => { if (active) setLogs((previous) => [...previous, message]); },
+          async (finalStatus, count) => {
+            if (!active) return;
+            setStatus(finalStatus);
+            setFindingsCount(count);
+            refreshSessions();
+            if (finalStatus === "completed") {
+              try {
+                const result = await getAgentReport(sessionId);
+                if (active) setReport(result.report);
+              } catch { /* report can be unavailable after failure */ }
+            }
+          },
+          (error) => { if (active) setLogs((previous) => [...previous, `[STREAM] ${error}`]); },
+        );
+      } else {
+        setLogs(data.logs || []);
+        if (data.status === "completed") {
+          const result = await getAgentReport(sessionId);
+          if (active) setReport(result.report);
+        }
+      }
+    }).catch((error) => { if (active) setLogs([`[STATUS] ${error.message}`]); });
+    return () => { active = false; stream?.abort(); };
+  }, [isAuth, sessionId]);
 
   const refreshSessions = async () => {
     try {
@@ -42,26 +88,9 @@ export default function AgentPage() {
     setStatus("running");
     setFindingsCount(0);
     setReport(null);
-  };
-
-  const handleLog = (msg: string) => {
-    setLogs((prev) => [...prev, msg]);
-  };
-
-  const handleDone = async (finalStatus: string, count: number) => {
-    setStatus(finalStatus);
-    setFindingsCount(count);
     refreshSessions();
-
-    if (sessionId && finalStatus === "completed") {
-      try {
-        const data = await getAgentReport(sessionId);
-        setReport(data.report);
-      } catch {
-        // ignore
-      }
-    }
   };
+
 
   if (!isAuth) return null;
 
@@ -80,7 +109,7 @@ export default function AgentPage() {
           &larr; Dashboard
         </button>
 
-        <AgentTaskPanel onTaskStart={handleTaskStart} onLog={handleLog} onDone={handleDone} />
+        <AgentTaskPanel onTaskStart={handleTaskStart} running={status === "running"} />
 
         {/* Recent sessions */}
         {sessions.length > 0 && (
@@ -92,10 +121,6 @@ export default function AgentPage() {
                   key={s.id}
                   onClick={() => {
                     setSessionId(s.id);
-                    setLogs([]);
-                    setStatus(s.status);
-                    setFindingsCount(s.findings_count);
-                    setReport(null);
                   }}
                   className={`w-full text-left text-xs px-2 py-1 rounded ${
                     sessionId === s.id

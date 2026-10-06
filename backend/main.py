@@ -137,13 +137,14 @@ def init_db():
             if not has_llm_provider:
                 cursor.execute("ALTER TABLE users ADD COLUMN llm_provider VARCHAR(20) DEFAULT 'local'")
             # 兼容历史数据：旧账号无验证令牌时默认视为已激活，避免升级后无法登录
-            cursor.execute(
-                """
-                UPDATE users
-                SET is_active=TRUE
-                WHERE is_active=FALSE AND verification_token IS NULL
-                """
-            )
+            if not has_is_active or not has_verification_token:
+                cursor.execute(
+                    """
+                    UPDATE users
+                    SET is_active=TRUE
+                    WHERE is_active=FALSE AND verification_token IS NULL
+                    """
+                )
             cursor.execute(
                 "UPDATE users SET llm_provider=%s WHERE llm_provider IS NULL OR llm_provider=''",
                 (normalize_provider(settings.LLM_PROVIDER),),
@@ -239,31 +240,19 @@ def init_db():
                     steps_total INT DEFAULT 0,
                     report TEXT NULL,
                     logs JSON NULL,
+                    findings JSON NULL,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                 """
             )
             cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS agent_findings (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    session_id VARCHAR(8) NOT NULL,
-                    title VARCHAR(500) NOT NULL,
-                    severity VARCHAR(20) NOT NULL,
-                    description TEXT NULL,
-                    evidence JSON NULL,
-                    cve_id VARCHAR(50) NULL,
-                    cvss_score DECIMAL(3,1) NULL,
-                    file_path VARCHAR(500) NULL,
-                    line_number INT NULL,
-                    fixed_code TEXT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
+                """SELECT COUNT(*) AS cnt FROM information_schema.columns
+                   WHERE table_schema=%s AND table_name='agent_sessions' AND column_name='findings'""",
+                (settings.MYSQL_DB,),
             )
-
+            if cursor.fetchone()["cnt"] == 0:
+                cursor.execute("ALTER TABLE agent_sessions ADD COLUMN findings JSON NULL")
             # 兼容历史数据：旧数据默认归属 admin，避免升级后"全丢失"
             cursor.execute("SELECT id FROM users WHERE username=%s LIMIT 1", ("admin",))
             admin_row = cursor.fetchone()
@@ -275,25 +264,24 @@ def init_db():
 
 # ================= 初始化默认管理员账户 =================
 def init_default_admin():
-    """创建默认管理员账户（如果不存在）"""
+    """Create the first admin only with an explicitly configured password."""
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute("SELECT id FROM users WHERE username=%s", ("admin",))
             admin = cursor.fetchone()
             if not admin:
+                password = settings.INITIAL_ADMIN_PASSWORD
+                if not password or len(password) < 12 or password == "admin123":
+                    raise RuntimeError("Set INITIAL_ADMIN_PASSWORD to a unique password of at least 12 characters before first startup")
                 cursor.execute(
                     """
                     INSERT INTO users (username, hashed_password, email, full_name, role, is_active)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     """,
-                    ("admin", get_password_hash("admin123"), "admin@sec-llm.local", "系统管理员", "admin", True)
+                    ("admin", get_password_hash(password), "admin@sec-llm.local", "系统管理员", "admin", True)
                 )
-                print("[OK] 已创建默认管理员账户: admin / admin123")
+                print("[OK] 已创建管理员账户: admin")
             else:
-                cursor.execute(
-                    "UPDATE users SET is_active=TRUE, llm_provider=%s WHERE username=%s",
-                    (normalize_provider(settings.LLM_PROVIDER), "admin"),
-                )
                 print("[OK] 管理员账户已存在")
 
 
@@ -376,8 +364,15 @@ async def startup_event():
     try:
         init_db()
         init_default_admin()
+        from agents.orchestrator import recover_agent_sessions
+        recovered = await recover_agent_sessions()
+        if recovered:
+            print(f"[Agent] Resumed {recovered} queued sessions")
     except Exception as e:
         print(f"[DB ERROR] 初始化失败: {e}")
+        raise
+
+    app.state.agent_recovery_task = asyncio.create_task(agent_recovery_scheduler())
 
     # 启动时先执行一次清理
     print("[STARTUP] 执行启动清理...")
@@ -387,6 +382,29 @@ async def startup_event():
     cleanup_thread = threading.Thread(target=temp_cleanup_scheduler, daemon=True)
     cleanup_thread.start()
     print(f"[STARTUP] 临时文件清理任务已启动 (保留时间: {TEMP_FILE_MAX_AGE_HOURS}小时, 检查间隔: {CLEANUP_INTERVAL_HOURS}小时)")
+
+
+async def agent_recovery_scheduler():
+    """Reconcile stale sessions while every API worker remains online."""
+    from agents.orchestrator import recover_agent_sessions
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await recover_agent_sessions()
+        except Exception as error:
+            print(f"[Agent] Session recovery failed: {error}")
+
+
+@app.on_event("shutdown")
+async def shutdown_agent_recovery():
+    task = getattr(app.state, "agent_recovery_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 # ================= 🤖 LLM 客户端初始化 =================
 # 云端客户端（有 Key 即初始化，是否使用由运行时开关控制）

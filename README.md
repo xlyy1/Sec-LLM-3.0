@@ -62,7 +62,7 @@
 | **Web 控制台** | Next.js Agent 面板：任务提交 + 实时日志流 + 报告查看 |
 | **CLI** | 6 条命令：`scan` `audit` `stream` `status` `report` `intel` |
 | **TUI** | Textual 终端界面：实时 Agent 监控 + 状态面板 |
-| **REST API** | 5 个 Agent 端点 + SSE 实时日志流 |
+| **REST API** | 6 个 Agent 端点 + SSE 实时日志流 |
 | **OpenClaw Skill** | Telegram / Discord / Slack 渠道集成 |
 
 ### 安全能力
@@ -85,7 +85,7 @@ sec-llm-4.0/
 │   ├── alembic.ini          # 数据库迁移配置
 │   ├── migrations/          # Alembic 迁移
 │   ├── api/
-│   │   └── agent.py         # Agent API (5 端点 + SSE)
+│   │   └── agent.py         # Agent API (6 端点 + SSE)
 │   ├── core/
 │   │   ├── llm/             # LLM 抽象层 (base, ollama, deepseek, router)
 │   │   ├── auth/            # 认证 (jwt, password, dependencies)
@@ -174,7 +174,7 @@ docker build -t sec-llm-sandbox:latest .
 | Web 仪表盘 | `http://localhost:3000` |
 | Agent 控制台 | `http://localhost:3000/agent` |
 | API 文档 | `http://localhost:8000/docs` |
-| 默认账户 | `admin` / `admin123` |
+| 初始管理员 | `admin` / 首次启动前配置的 `INITIAL_ADMIN_PASSWORD` |
 
 ---
 
@@ -182,6 +182,7 @@ docker build -t sec-llm-sandbox:latest .
 
 ```env
 # LLM 引擎
+INITIAL_ADMIN_PASSWORD=replace-with-a-unique-password-of-at-least-12-characters
 LLM_PROVIDER=local          # local | cloud
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL_NAME=llama3:8b
@@ -192,6 +193,14 @@ DEEPSEEK_MODEL_NAME=deepseek-chat
 # 威胁情报（可选）
 ABUSEIPDB_API_KEY=...       # 可选
 OTX_API_KEY=...              # 可选
+
+# TypeSafe Jev（shell_exec 和 browser_check_xss 必需；未配置时高风险调用默认阻止）
+TYPESAFE_API_KEY=...
+TYPESAFE_BASE_URL=https://api.typesafe.ai
+TYPESAFE_MODEL=jev-latest
+JEV_MIN_CONFIDENCE=0.8
+AGENT_MAX_CONCURRENT=4
+AGENT_TASK_TIMEOUT_SECONDS=1800
 
 # 数据库
 DATABASE_TYPE=mysql
@@ -268,6 +277,13 @@ python tui.py
 | GET | `/api/agent/{id}/status` | JWT / Skill Key | 会话状态与进度 |
 | GET | `/api/agent/{id}/stream` | JWT / Skill Key | SSE 实时日志流 |
 | GET | `/api/agent/{id}/report` | JWT / Skill Key | 最终安全报告 |
+| DELETE | `/api/agent/{id}` | JWT / Skill Key | 取消任务（跨 Worker 为协作取消） |
+
+`task_type=web_scan` 使用侦察→检测→报告的多 Agent 图；`code_audit`、`threat_intel`、`comprehensive` 保留规划→执行图。两条路径共用同一会话、状态和报告接口。POST 创建会话后立即返回，任务在后台执行；进度查询中的 `steps_*` 分别表示多 Agent 阶段数或规划工具步数。
+
+Agent 会话依赖 MySQL：创建任务和每个图节点完成后同步保存状态、日志与发现，`agent_sessions.findings` 是发现项的唯一运行时数据源。数据库不可用时任务不会以“已保存”继续执行。服务启动时会恢复超时后仍未开始的排队任务；多个 Worker 通过 MySQL 条件更新原子认领，同一任务只有一个 Worker 执行。已进入执行阶段的中断任务标记为失败，绝不重放安全工具。同 Worker 的 SSE 由状态事件唤醒，跨 Worker 的 SSE 每秒读取 MySQL；跨 Worker 取消在执行进程的下一个持久化点生效。现有数据库需先执行 `alembic upgrade head`，或由应用启动时的 `init_db` 补齐字段。
+
+真实基础设施检查默认跳过；配置好本机 MySQL、Docker 和 Playwright 后运行：`RUN_AGENT_INTEGRATION=1 pytest backend/tests/test_agent_integration.py`。双进程用例验证跨 Worker 日志流、取消和唯一认领，并清理测试会话。
 
 ### 示例
 
@@ -386,10 +402,11 @@ tests/test_agent_supervisor.py ......  10 passed
 
 ## 安全提示
 
-- 生产环境请修改 `JWT_SECRET_KEY` 与默认管理员密码
+- 首次启动必须配置 `INITIAL_ADMIN_PASSWORD`（至少 12 位）；已有管理员不会在启动时被重新激活
+- 生产环境必须设置安全的 `JWT_SECRET_KEY`
 - 不要将 API Key 提交到代码仓库
 - 建议使用专用 MySQL 账号并限制权限
-- Docker 沙箱默认禁用网络、限制内存/CPU、只读根文件系统
+- Docker 沙箱对网络扫描工具使用 bridge 网络，对离线代码扫描工具禁用网络；均限制内存/CPU 并使用只读根文件系统
 
 ---
 

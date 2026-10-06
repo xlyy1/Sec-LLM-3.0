@@ -99,4 +99,13 @@ async def invoke_tool(name: str, **kwargs) -> Any:
     tool = get_tool(name)
     if tool is None:
         raise ValueError(f"Unknown tool: {name}. Available: {list_tool_names()}")
+
+    from core.jev import evaluate_tool_action
+
+    decision = await evaluate_tool_action(name, kwargs)
+    if decision and decision["action"] != "allow":
+        raise PermissionError(
+            f"Jev blocked {name}: {decision['action']} "
+            f"(confidence={decision['confidence']:.3f})"
+        )
     return await tool["func"](**kwargs)

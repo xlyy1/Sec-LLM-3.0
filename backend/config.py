@@ -1,14 +1,17 @@
 """Sec-LLM Agent Platform Configuration."""
 from typing import Optional
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
     # Base
     ENV_MODE: str = "dev"
     JWT_SECRET_KEY: str = "default-unsafe-secret-key"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+    INITIAL_ADMIN_PASSWORD: Optional[str] = None
 
     # LLM core
     LLM_PROVIDER: str = "local"  # local or cloud
@@ -20,6 +23,12 @@ class Settings(BaseSettings):
     ABUSEIPDB_API_KEY: Optional[str] = None
     OTX_API_KEY: Optional[str] = None
     THREAT_INTEL_TIMEOUT_SECONDS: float = 4.0
+
+    # TypeSafe Jev tool guard (enabled when an API key is configured)
+    TYPESAFE_API_KEY: Optional[str] = None
+    TYPESAFE_BASE_URL: str = "https://api.typesafe.ai"
+    TYPESAFE_MODEL: str = "jev-latest"
+    JEV_MIN_CONFIDENCE: float = 0.8
 
     # Local Ollama
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
@@ -50,12 +59,10 @@ class Settings(BaseSettings):
     AGENT_SANDBOX_IMAGE: str = "sec-llm-sandbox:latest"
     AGENT_MAX_STEPS: int = 20
     AGENT_STEP_TIMEOUT_SECONDS: int = 300
+    AGENT_TASK_TIMEOUT_SECONDS: int = 1800
+    AGENT_MAX_CONCURRENT: int = 4
     AGENT_BROWSER_HEADLESS: bool = True
     AGENT_DEFAULT_SCAN_MODE: str = "standard"  # standard | deep | quick
-
-    class Config:
-        env_file = ".env"
-
 
 settings = Settings()
 

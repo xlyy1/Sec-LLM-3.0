@@ -38,3 +38,9 @@ class AgentState(TypedDict):
     # Output
     report: Optional[str]              # Final report markdown
     logs: List[str]                    # Execution log stream for SSE
+
+    # Node-owned state; flat fields above remain as API/session compatibility projections.
+    planner_state: Dict[str, Any]
+    executor_state: Dict[str, Any]
+    reflector_state: Dict[str, Any]
+    reporter_state: Dict[str, Any]
