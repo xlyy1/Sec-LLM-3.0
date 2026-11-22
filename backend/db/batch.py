@@ -37,8 +37,9 @@ def bulk_insert(
         sql = sql.replace("%s", placeholder)
 
     written = 0
-    conn = connect()
+    conn = None
     try:
+        conn = connect()
         by_chunk = [data[i : i + chunk_size] for i in range(0, len(data), chunk_size)]
         cursor = conn.cursor()
         try:
@@ -48,10 +49,15 @@ def bulk_insert(
             conn.commit()
         finally:
             cursor.close()
-    except Exception as exc:  # noqa: BLE001
-        conn.rollback()
+    except Exception as exc:  # noqa: BLE001  连接失败也算整批失败
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001  连接已断时 rollback 也会失败，忽略
+                pass
         raise BulkWriteError(f"批量写入失败，已回滚 {written} 行：{exc}") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     return written

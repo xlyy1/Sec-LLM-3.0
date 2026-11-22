@@ -125,3 +125,23 @@ def test_persist_findings_safe_swallows_error(connect):
         return conn
 
     assert persist_findings_safe(broken_connect, "s4", "https://d.test", bad_rows, placeholder="?") == 0
+
+
+def test_connect_failure_is_wrapped_and_safe():
+    """连接本身失败也要包装成 BulkWriteError，safe 版更不能把异常抛给扫描主流程。"""
+
+    def dead_connect():
+        raise ConnectionError("MySQL 不可用")
+
+    with pytest.raises(BulkWriteError):
+        bulk_insert(
+            dead_connect,
+            "INSERT INTO scan_findings (session_id) VALUES (?)",
+            [("s5",)],
+            placeholder="?",
+        )
+
+    assert persist_findings_safe(
+        dead_connect, "s5", "https://e.test", [{"evidence_id": "F9"}], placeholder="?"
+    ) == 0
+

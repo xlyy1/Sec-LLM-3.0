@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Iterable
 
-from db.batch import BulkWriteError, bulk_insert
+from db.batch import bulk_insert
 
 INSERT_SQL = (
     "INSERT INTO scan_findings (session_id, evidence_id, title, severity, target, detail) "
@@ -52,9 +52,12 @@ def persist_findings_safe(
     *,
     placeholder: str = "%s",
 ) -> int:
-    """同 persist_findings，但把异常吞掉只打日志（给扫描主流程用）。"""
+    """同 persist_findings，但把异常吞掉只打日志（给扫描主流程用）。
+
+    这里故意捕获所有异常：落库只是附带产物，数据库连不上也不该让扫描结果丢失。
+    """
     try:
         return persist_findings(connect, session_id, target, findings, placeholder=placeholder)
-    except BulkWriteError as error:
+    except Exception as error:  # noqa: BLE001
         print(f"[FINDINGS] batch write failed for {session_id}: {error}")
         return 0
