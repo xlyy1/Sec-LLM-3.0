@@ -8,6 +8,7 @@ mounts, no privileged mode and no arbitrary Docker API methods.
 from __future__ import annotations
 
 import os
+import secrets
 import threading
 import uuid
 from typing import List, Optional
@@ -50,7 +51,7 @@ class RunRequest(BaseModel):
 def _check_token(token: Optional[str]) -> None:
     if not _TOKEN:
         raise HTTPException(status_code=503, detail="runner token is not configured")
-    if token != _TOKEN:
+    if not secrets.compare_digest(token or "", _TOKEN):
         raise HTTPException(status_code=401, detail="invalid runner token")
 
 

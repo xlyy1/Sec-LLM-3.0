@@ -1,6 +1,10 @@
 """Docker sandbox security-tool execution."""
+import ipaddress
+import re
 import shlex
 import uuid
+from typing import Iterable, List
+from urllib.parse import urlsplit
 
 from config import settings
 from tools.registry import register_tool
@@ -8,6 +12,67 @@ from tools.registry import register_tool
 _ALLOWED_TOOLS = {"nmap", "sqlmap", "nuclei", "ffuf", "nikto", "whatweb", "semgrep", "bandit"}
 _STDOUT_LIMIT = 1_000_000
 _STDERR_LIMIT = 256_000
+_HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$")
+_BLOCKED_HOSTS = {"host.docker.internal", "localhost", "metadata.google.internal"}
+
+
+def _candidate_hosts(args: Iterable[str]) -> List[str]:
+    hosts: List[str] = []
+    for arg in args:
+        if not arg or arg.startswith("-") or "=" in arg:
+            continue
+        if arg.isdigit():
+            # Port numbers / thread counts are not targets.
+            continue
+        if "://" in arg:
+            value = urlsplit(arg).hostname or ""
+            if value:
+                hosts.append(value)
+            continue
+        if "/" in arg:
+            continue
+        value = arg
+        if ":" in arg and arg.count(":") == 1:
+            value = arg.split(":", 1)[0]
+        if not value:
+            continue
+        if _is_ip(value) or _HOSTNAME_RE.match(value) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", value):
+            hosts.append(value)
+    return hosts
+
+
+def _is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_blocked_host(host: str, allow_private: bool) -> bool:
+    lowered = host.strip().lower().rstrip(".")
+    if lowered in _BLOCKED_HOSTS or lowered.endswith((".localhost", ".local", ".internal")):
+        return True
+    try:
+        ip = ipaddress.ip_address(lowered)
+    except ValueError:
+        # Hostnames are not resolved here: a synchronous DNS lookup would block
+        # the request path. DNS-rebinding to a private address is covered by the
+        # deployment-level egress policy documented in README.
+        return False
+    if ip.is_loopback and not allow_private:
+        return True
+    if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        return True
+    return ip.is_private and not allow_private
+
+
+def _target_error(args: Iterable[str]) -> str:
+    allow_private = bool(getattr(settings, "AGENT_ALLOW_PRIVATE_TARGETS", False))
+    for host in _candidate_hosts(args):
+        if _is_blocked_host(host, allow_private):
+            return f"Target rejected: {host} is loopback/private/internal"
+    return ""
 
 
 async def _capture(proc):
@@ -53,6 +118,10 @@ async def shell_exec(command: str, timeout: int = 300) -> dict:
         args = []
     if not args or args[0] not in _ALLOWED_TOOLS:
         return {"stdout": "", "stderr": "Command rejected: unsupported tool", "exit_code": -1}
+
+    target_error = _target_error(args[1:])
+    if target_error:
+        return {"stdout": "", "stderr": target_error, "exit_code": -1}
 
     sandbox_image = settings.AGENT_SANDBOX_IMAGE
     container_name = f"sec-llm-{uuid.uuid4().hex}"

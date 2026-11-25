@@ -85,18 +85,21 @@ class TestShellExec:
         assert result["exit_code"] == -1
         assert "rejected" in result["stderr"].lower() or "unsafe" in result["stderr"].lower()
 
-    def test_safe_nmap_command_accepted(self):
+    def test_safe_nmap_command_accepted(self, monkeypatch):
         """Shell exec should accept valid security tool commands."""
+        from config import settings
+        monkeypatch.setattr(settings, "AGENT_ALLOW_PRIVATE_TARGETS", True)
         tool = get_tool("shell_exec")
         import asyncio
-        result = asyncio.run(tool["func"]("nmap -sV -F 127.0.0.1", timeout=30))
-        # Either succeeds (Docker available) or returns error about Docker
+        result = asyncio.run(tool["func"]("nmap --version", timeout=30))
         assert "exit_code" in result
 
     def test_shell_metacharacters_are_rejected(self, monkeypatch):
         import asyncio
+        from config import settings
         from tools.shell import shell_exec
 
+        monkeypatch.setattr(settings, "AGENT_ALLOW_PRIVATE_TARGETS", True)
         calls = []
 
         class Process:
@@ -135,8 +138,10 @@ class TestShellExec:
 
     def test_timeout_removes_own_container(self, monkeypatch):
         import asyncio
+        from config import settings
         from tools.shell import shell_exec
 
+        monkeypatch.setattr(settings, "AGENT_ALLOW_PRIVATE_TARGETS", True)
         calls = []
 
         class RunProcess:
@@ -175,8 +180,10 @@ class TestShellExec:
 
     def test_cancel_removes_own_container(self, monkeypatch):
         import asyncio
+        from config import settings
         from tools.shell import shell_exec
 
+        monkeypatch.setattr(settings, "AGENT_ALLOW_PRIVATE_TARGETS", True)
         calls = []
         started = asyncio.Event()
 

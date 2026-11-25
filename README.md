@@ -167,6 +167,7 @@ docker compose up -d --build --wait
 - Redis 承载跨 Worker 的登录失败计数（`REDIS_URL`，默认 `redis://redis:6379/0`）；留空时退回进程内计数，单副本仍可运行。
 - `backend/models` 以只读方式挂载到容器；没有本地模型时会回退到 Ollama（`OLLAMA_BASE_URL`，Docker Desktop 默认走 `host.docker.internal:11434`）。
 - **沙箱隔离**：backend 容器**不挂载** `docker.sock`；`sandbox-runner` 是唯一持有 socket 的服务，只接受 allowlist 工具 + argv（拒绝 `--privileged/--volume/--mount/--network` 等），固定 `cap-drop ALL / read-only / no-new-privileges / 512MB / 1 CPU`，网络工具用 bridge、离线工具用 none。API 通过带 token 的 HTTP 调用它。
+- **目标边界**：`shell_exec` 在提交到 runner 前检查目标，默认拒绝 loopback/私网/链路本地/`host.docker.internal`（`AGENT_ALLOW_PRIVATE_TARGETS=true` 仅用于自建靶场）；浏览器工具沿用同一策略。
 - 安全工具镜像需先构建：`docker compose --profile sandbox build sandbox`。
 - 构建阶段需要代理时，把代理传给 BuildKit（不会写进镜像）：
   `docker compose build --build-arg HTTPS_PROXY=http://host.docker.internal:7897 --build-arg HTTP_PROXY=http://host.docker.internal:7897`
