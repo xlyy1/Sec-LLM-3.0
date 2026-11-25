@@ -10,16 +10,9 @@ from core.auth.jwt import get_current_user, oauth2_scheme
 
 
 def get_db_connection():
-    return pymysql.connect(
-        host=settings.MYSQL_HOST,
-        user=settings.MYSQL_USER,
-        password=settings.MYSQL_PASSWORD,
-        database=settings.MYSQL_DB,
-        port=settings.MYSQL_PORT,
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-    )
+    from core.db import get_connection
+
+    return get_connection()
 
 
 def get_db():

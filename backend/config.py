@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     MYSQL_HOST: str = "localhost"
     MYSQL_PORT: int = 3306
     MYSQL_DB: str = "sec_llm_db"
+    # Bounded warm PyMySQL connections for API request handlers.
+    DB_POOL_SIZE: int = 10
+    DB_POOL_TIMEOUT_SECONDS: float = 5.0
 
     # Shared runtime state (login throttling). Empty = in-process fallback.
     REDIS_URL: str = ""

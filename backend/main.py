@@ -94,16 +94,9 @@ from core.auth.rbac import normalize_role, require_write
 from core import audit as audit_log
 
 def get_db_connection():
-    return pymysql.connect(
-        host=settings.MYSQL_HOST,
-        user=settings.MYSQL_USER,
-        password=settings.MYSQL_PASSWORD,
-        database=settings.MYSQL_DB,
-        port=settings.MYSQL_PORT,
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-    )
+    from core.db import get_connection
+
+    return get_connection()
 
 
 # --- 登录失败限流：Redis 共享计数，未配置/不可用时退回进程内窗口 ---

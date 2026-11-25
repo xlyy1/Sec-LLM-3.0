@@ -27,6 +27,26 @@ curl -k https://localhost/                     # 前端页面
 - `/metrics` 已在 Nginx 层 `deny all`，只允许内网 Prometheus 抓取。
 - 镜像/配置变更后先在有 staging 域名的环境跑一轮 smoke，再切生产 DNS。
 
+## 数据备份与恢复
+
+MySQL 数据在 `mysql_data` 卷中，备份必须在容器运行、写入暂停或低峰时进行：
+
+```bash
+# 逻辑备份（每日）
+docker compose exec -T mysql mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" \
+  --single-transaction --routines --triggers sec_llm_db > backup-$(date +%F).sql
+
+# 恢复
+docker compose exec -T mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" sec_llm_db < backup-2026-11-25.sql
+```
+
+生产建议：
+
+- 开启 binlog（`--log-bin --binlog-expire-logs-seconds=604800`）并定期归档，用于 PITR。
+- 备份文件放对象存储并做加密；至少保留 7 个日备 + 4 个周备。
+- 每季度做一次恢复演练，记录 RTO/RPO。
+- `refresh_tokens` / `audit_events` 需要定期清理（例如保留 180 天），不要无限增长。
+
 ## 当前边界
 
 - Nginx 只负责 TLS、路由、请求体大小、SSE 不缓冲和基础安全头；限流/配额仍在应用层。

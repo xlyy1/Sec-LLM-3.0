@@ -46,6 +46,54 @@ jobs:
           and not run_supervisor_basic and not safe_nmap_command_accepted
           and not run_agent_ui"
 
+  migrations:
+    name: Migrations (MySQL 8.4)
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root-test-password
+          MYSQL_DATABASE: sec_llm_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot-test-password"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root-test-password
+      MYSQL_DB: sec_llm_test
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install migration dependencies
+        run: python -m pip install "alembic>=1.13,<2" "SQLAlchemy>=2,<3" pymysql pydantic-settings cryptography
+      - name: Apply every migration to a fresh database
+        working-directory: backend
+        run: alembic upgrade head
+      - name: Verify expected tables exist
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          import pymysql
+          conn = pymysql.connect(host="127.0.0.1", user="root", password="root-test-password",
+                                 database="sec_llm_test", autocommit=True)
+          with conn.cursor() as cur:
+              cur.execute("SHOW TABLES")
+              tables = {row[0] for row in cur.fetchall()}
+          expected = {"users", "agent_sessions", "refresh_tokens", "audit_events", "scan_findings"}
+          missing = expected - tables
+          assert not missing, f"missing tables: {missing}"
+          print("migration tables OK:", sorted(expected))
+          PY
+
   frontend:
     name: Frontend
     runs-on: ubuntu-24.04
