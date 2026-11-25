@@ -108,6 +108,25 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # TLS terminator for a production-like deployment:
+  #   python scripts/gen-dev-cert.py
+  #   docker compose --profile proxy up -d
+  nginx:
+    image: nginx:1.27-alpine
+    profiles: ["proxy"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+
   # Narrow executor: the only service with the Docker socket. The API reaches it
   # over HTTP with a shared token and can only request allowlisted tools.
   sandbox-runner:

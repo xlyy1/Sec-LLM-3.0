@@ -171,6 +171,7 @@ docker compose up -d --build --wait
 - 安全工具镜像需先构建：`docker compose --profile sandbox build sandbox`。
 - 构建阶段需要代理时，把代理传给 BuildKit（不会写进镜像）：
   `docker compose build --build-arg HTTPS_PROXY=http://host.docker.internal:7897 --build-arg HTTP_PROXY=http://host.docker.internal:7897`
+- 需要 TLS / 生产入口时：`python scripts/gen-dev-cert.py && docker compose --profile proxy up -d nginx`，访问 `https://localhost/`；完整说明见 [deploy/README.md](deploy/README.md)。
 - 受限网络：如果 `docker pull` 超时但容器能访问宿主机代理，先把 Docker Desktop 的代理改为 `http://host.docker.internal:<端口>`（`127.0.0.1` 在 Docker 虚拟机里指向它自己）；仍不可用时，在有网机器上 `docker save` 基础镜像，再 `docker load` 导入。
 - 停止：`docker compose down`；连同数据卷一起删除：`docker compose down -v`。
 
