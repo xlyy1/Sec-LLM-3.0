@@ -15,7 +15,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, B
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_chroma import Chroma
@@ -141,6 +141,8 @@ def init_db():
                     llm_provider VARCHAR(20) DEFAULT 'local',
                     is_active BOOLEAN DEFAULT FALSE,
                     verification_token VARCHAR(255),
+                    reset_token VARCHAR(255),
+                    reset_expires DATETIME,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     last_login DATETIME NULL
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -181,6 +183,17 @@ def init_db():
             has_llm_provider = cursor.fetchone()["cnt"] > 0
             if not has_llm_provider:
                 cursor.execute("ALTER TABLE users ADD COLUMN llm_provider VARCHAR(20) DEFAULT 'local'")
+            for column, ddl in (
+                ("reset_token", "ALTER TABLE users ADD COLUMN reset_token VARCHAR(255)"),
+                ("reset_expires", "ALTER TABLE users ADD COLUMN reset_expires DATETIME"),
+            ):
+                cursor.execute(
+                    """SELECT COUNT(*) AS cnt FROM information_schema.columns
+                       WHERE table_schema=%s AND table_name='users' AND column_name=%s""",
+                    (settings.MYSQL_DB, column),
+                )
+                if cursor.fetchone()["cnt"] == 0:
+                    cursor.execute(ddl)
             # 兼容历史数据：旧账号无验证令牌时默认视为已激活，避免升级后无法登录
             if not has_is_active or not has_verification_token:
                 cursor.execute(
@@ -675,6 +688,22 @@ class AdminCreateUser(BaseModel):
     full_name: Optional[str] = None
 
 
+class ForgotPasswordRequest(BaseModel):
+    # str (not EmailStr): legacy deployments may use internal-only domains such
+    # as admin@sec-llm.local, which email-validator rejects as special-use.
+    email: str = Field(..., min_length=3, max_length=255)
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class PhishingAnalyzeRequest(BaseModel):
     content: str
 
@@ -740,6 +769,27 @@ async def send_verification_email_safe(email: str, token: str):
         print(f"[MAIL] Verification mail sent to: {email}")
     except Exception as e:
         print(f"[MAIL ERROR] Failed to send verification mail to {email}: {e}")
+
+
+async def send_password_reset_email(email: str, token: str) -> None:
+    if mail_conf is None:
+        raise RuntimeError("邮件服务未配置")
+    reset_url = f"{settings.DOMAIN_URL}/reset-password?token={token}"
+    html = f"""
+    <div style="font-family: Arial, sans-serif; padding: 20px;">
+      <h2>Sec-LLM 密码重置</h2>
+      <p>收到重置密码请求，请点击下方链接（30 分钟内有效）：</p>
+      <p><a href="{reset_url}">{reset_url}</a></p>
+      <p>如果这不是你的操作，请忽略此邮件。</p>
+    </div>
+    """
+    message = MessageSchema(
+        subject="【Sec-LLM】重置密码",
+        recipients=[email],
+        body=html,
+        subtype=MessageType.html,
+    )
+    await FastMail(mail_conf).send_message(message)
 
 # --- 接口 1: 健康检查 ---@app.get("/")
 def health_check():
@@ -1104,6 +1154,123 @@ def login(req: LoginRequest, request: Request, response: Response, db=Depends(ge
             role=user.get("role", "user")
         )
     )
+
+@app.post("/api/auth/forgot-password")
+def forgot_password(
+    req: ForgotPasswordRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db=Depends(get_db),
+):
+    """Always return the same message so the endpoint cannot enumerate emails."""
+    generic = {"status": "success", "message": "如果该邮箱已注册，我们已发送重置链接"}
+    with db.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, username, is_active FROM users WHERE email=%s", (str(req.email),)
+        )
+        user = cursor.fetchone()
+    if not user or not user.get("is_active"):
+        return generic
+
+    token = create_access_token(
+        data={"sub": user["username"], "type": "reset"},
+        expires_delta=timedelta(minutes=30),
+        token_type="reset",
+    )
+    with db.cursor() as cursor:
+        cursor.execute(
+            "UPDATE users SET reset_token=%s, reset_expires=DATE_ADD(NOW(), INTERVAL 30 MINUTE) "
+            "WHERE id=%s",
+            (token, user["id"]),
+        )
+    if _mail_config_ready():
+        background_tasks.add_task(send_password_reset_email, str(req.email), token)
+    audit_log.record(
+        db, user_id=user["id"], username=user["username"],
+        action="password_reset_requested", request=request,
+    )
+    # Local development convenience; never expose the token in production.
+    if (settings.ENV_MODE or "dev").lower() not in ("prod", "production"):
+        return {**generic, "reset_token": token}
+    return generic
+
+
+@app.post("/api/auth/reset-password")
+def reset_password(
+    req: ResetPasswordRequest,
+    request: Request,
+    db=Depends(get_db),
+):
+    try:
+        payload = jwt.decode(req.token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("typ") != "reset":
+            raise JWTError("wrong token type")
+        username = payload.get("sub")
+    except JWTError as error:
+        raise HTTPException(status_code=400, detail="重置链接无效或已过期") from error
+
+    with db.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, username, reset_token, reset_expires, is_active "
+            "FROM users WHERE username=%s",
+            (username,),
+        )
+        user = cursor.fetchone()
+    if (
+        not user
+        or not user.get("reset_token")
+        or user["reset_token"] != req.token
+        or not user.get("reset_expires")
+        or user["reset_expires"] < datetime.now(timezone.utc).replace(tzinfo=None)
+    ):
+        raise HTTPException(status_code=400, detail="重置链接无效或已过期")
+
+    problem = password_problem(req.new_password, user["username"], settings.USER_PASSWORD_MIN_LENGTH)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+
+    with db.cursor() as cursor:
+        cursor.execute(
+            "UPDATE users SET hashed_password=%s, reset_token=NULL, reset_expires=NULL "
+            "WHERE id=%s",
+            (get_password_hash(req.new_password), user["id"]),
+        )
+    auth_tokens.revoke_all(user["id"])
+    auth_tokens.revoke_all_access(user["id"])
+    audit_log.record(
+        db, user_id=user["id"], username=user["username"],
+        action="password_reset", request=request,
+    )
+    return {"status": "success", "message": "密码已重置，请使用新密码登录"}
+
+
+@app.post("/api/auth/change-password")
+def change_password(
+    req: ChangePasswordRequest,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_active_user),
+    db=Depends(get_db),
+):
+    if not verify_password(req.current_password, current_user["hashed_password"]):
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    problem = password_problem(
+        req.new_password, current_user["username"], settings.USER_PASSWORD_MIN_LENGTH
+    )
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    with db.cursor() as cursor:
+        cursor.execute(
+            "UPDATE users SET hashed_password=%s WHERE id=%s",
+            (get_password_hash(req.new_password), current_user["id"]),
+        )
+    auth_tokens.revoke_all(current_user["id"])
+    auth_tokens.revoke_all_access(current_user["id"])
+    audit_log.record(
+        db, user_id=current_user["id"], username=current_user["username"],
+        action="password_change", request=request,
+    )
+    return {"status": "success", "message": "密码已修改，所有会话已失效，请重新登录"}
+
 
 # --- 接口 4: 获取当前用户信息 ---
 @app.get("/api/me")

@@ -235,7 +235,7 @@ export default function LoginPage() {
 
               {/* Additional Links */}
               <div className="flex text-sm">
-                <a href="#" className="text-gray-400 hover:text-cyan-400 transition-colors">
+                <a href="/forgot-password" className="text-gray-400 hover:text-cyan-400 transition-colors">
                   忘记密码？
                 </a>
               </div>

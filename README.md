@@ -370,6 +370,9 @@ curl -N http://localhost:8000/api/agent/<session_id>/stream \
 | POST | `/api/auth/refresh` | 轮换 refresh token（Cookie 或 JSON body） |
 | POST | `/api/auth/logout` | 撤销当前 refresh 并清 Cookie |
 | POST | `/api/auth/logout-all` | 撤销该用户全部会话（需登录） |
+| POST | `/api/auth/forgot-password` | 发送密码重置链接 |
+| POST | `/api/auth/reset-password` | 用重置 token 设置新密码 |
+| POST | `/api/auth/change-password` | 登录后修改密码 |
 | GET | `/api/usage/today` | 当前用户今日 token 用量与预算 |
 | GET/POST | `/api/admin/users` | 用户列表 / 创建用户（admin） |
 | PUT | `/api/admin/users/{id}/role` | 修改角色（admin） |
@@ -537,6 +540,8 @@ score = 100 - (12×Critical未处置 + 8×High未处置 + 3×Medium未处置 + 1
 - `POST /api/auth/logout` 撤销当前 refresh **并立即拉黑当前 access token**（jti 拒绝列表）；`POST /api/auth/logout-all` 撤销该用户全部 refresh 与 access（用户级时间截断），无需等 15 分钟过期。
 - 检测到 refresh 重放时，除了撤销登录族，也会让该用户已签发的 access token 立即失效。
 - 每个用户按 UTC 日计数 `DAILY_AGENT_QUOTA` / `DAILY_CHAT_QUOTA`（0 = 不限），超额返回 429 + `Retry-After`；计数写入 Redis，跨 Worker 共享。
+- `POST /api/auth/forgot-password` 发送 30 分钟有效的重置链接（不泄露邮箱是否存在）；`POST /api/auth/reset-password` 重置后撤销该用户全部 refresh/access；`POST /api/auth/change-password` 需登录并校验当前密码，成功后同样全端下线。
+- 开发环境（非 `ENV_MODE=prod`）`forgot-password` 会直接返回 `reset_token` 方便本地验证；生产只走邮件。
 - `REFRESH_COOKIE_SECURE=true` 只应在 HTTPS 下开启。Redis 不可用时拒绝列表退回进程内，单副本仍可用，但多副本下撤销不共享。
 
 ## 角色与用户管理
@@ -585,4 +590,4 @@ score = 100 - (12×Critical未处置 + 8×High未处置 + 3×Medium未处置 + 1
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。
+MIT，见 [LICENSE](LICENSE)。隐私与服务条款模板见 [PRIVACY.md](PRIVACY.md) 与 [TERMS.md](TERMS.md)（上线前需法务补全）。
