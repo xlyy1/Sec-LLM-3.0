@@ -91,6 +91,7 @@ from core.auth.dependencies import (
 )
 from core.auth import tokens as auth_tokens
 from core.auth.rbac import normalize_role, require_write
+from core import audit as audit_log
 
 def get_db_connection():
     return pymysql.connect(
@@ -349,6 +350,43 @@ def init_db():
                 admin_id = admin_row["id"]
                 cursor.execute("UPDATE log_records SET user_id=%s WHERE user_id IS NULL", (admin_id,))
                 cursor.execute("UPDATE knowledge_files SET user_id=%s WHERE user_id IS NULL", (admin_id,))
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NULL,
+                    username VARCHAR(50) NOT NULL,
+                    action VARCHAR(50) NOT NULL,
+                    target VARCHAR(500) NULL,
+                    detail JSON NULL,
+                    ip VARCHAR(64) NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_audit_events_user (user_id),
+                    INDEX idx_audit_events_action (action),
+                    INDEX idx_audit_events_created (created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+
+            # 会话列表/对比/恢复的高频查询索引（MySQL 不支持 CREATE INDEX IF NOT EXISTS）
+            index_sql = {
+                "idx_agent_sessions_user_target":
+                    "CREATE INDEX idx_agent_sessions_user_target "
+                    "ON agent_sessions (user_id, target(191), created_at)",
+                "idx_agent_sessions_status_updated":
+                    "CREATE INDEX idx_agent_sessions_status_updated "
+                    "ON agent_sessions (status, updated_at)",
+            }
+            for index_name, create_sql in index_sql.items():
+                cursor.execute(
+                    """SELECT COUNT(*) AS cnt FROM information_schema.statistics
+                       WHERE table_schema=%s AND table_name='agent_sessions'
+                         AND index_name=%s""",
+                    (settings.MYSQL_DB, index_name),
+                )
+                if cursor.fetchone()["cnt"] == 0:
+                    cursor.execute(create_sql)
 
 
 # ================= 初始化默认管理员账户 =================
@@ -980,10 +1018,16 @@ def logout_session(
 
 @app.post("/api/auth/logout-all")
 def logout_all_sessions(
+    request: Request,
     current_user: Dict[str, Any] = Depends(get_current_active_user),
+    db=Depends(get_db),
 ):
     count = auth_tokens.revoke_all(current_user["id"])
     auth_tokens.revoke_all_access(current_user["id"])
+    audit_log.record(
+        db, user_id=current_user["id"], username=current_user["username"],
+        action="logout_all", detail={"revoked": count}, request=request,
+    )
     return {"status": "success", "revoked": count}
 
 
@@ -1004,6 +1048,10 @@ def login(req: LoginRequest, request: Request, response: Response, db=Depends(ge
     
     if not user:
         _record_login_failure(guard_key)
+        audit_log.record(
+            db, user_id=None, username=req.username, action="login_failed",
+            detail={"reason": "unknown_user"}, request=request,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误"
@@ -1012,6 +1060,10 @@ def login(req: LoginRequest, request: Request, response: Response, db=Depends(ge
     # 验证密码
     if not verify_password(req.password, user["hashed_password"]):
         _record_login_failure(guard_key)
+        audit_log.record(
+            db, user_id=user["id"], username=req.username, action="login_failed",
+            detail={"reason": "bad_password"}, request=request,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误"
@@ -1019,12 +1071,20 @@ def login(req: LoginRequest, request: Request, response: Response, db=Depends(ge
 
     if not user.get("is_active", False):
         _record_login_failure(guard_key)
+        audit_log.record(
+            db, user_id=user["id"], username=req.username, action="login_failed",
+            detail={"reason": "inactive"}, request=request,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
         )
 
     _clear_login_failures(guard_key)
+    audit_log.record(
+        db, user_id=user["id"], username=user["username"], action="login",
+        request=request,
+    )
 
     # 更新最后登录时间
     with db.cursor() as cursor:
@@ -1068,6 +1128,7 @@ def get_me(current_user: Dict[str, Any] = Depends(get_current_active_user)):
 @app.post("/api/admin/users")
 def admin_create_user(
     req: AdminCreateUser,
+    request: Request,
     current_admin: Dict[str, Any] = Depends(get_current_admin_user),
     db=Depends(get_db),
 ):
@@ -1090,6 +1151,11 @@ def admin_create_user(
         user_id = cursor.lastrowid
 
     print(f"[AUDIT] {current_admin['username']} created user {req.username} role={req.role}")
+    audit_log.record(
+        db, user_id=current_admin["id"], username=current_admin["username"],
+        action="admin_create_user", target=req.username,
+        detail={"role": req.role}, request=request,
+    )
     return {"status": "success", "user_id": user_id, "role": req.role}
 
 
@@ -1112,6 +1178,7 @@ def admin_list_users(
 def admin_update_user_role(
     user_id: int,
     req: UserRoleUpdate,
+    request: Request,
     current_admin: Dict[str, Any] = Depends(get_current_admin_user),
     db=Depends(get_db),
 ):
@@ -1132,6 +1199,11 @@ def admin_update_user_role(
         cursor.execute("UPDATE users SET role=%s WHERE id=%s", (req.role, user_id))
 
     print(f"[AUDIT] {current_admin['username']} changed role of user {user_id} to {req.role}")
+    audit_log.record(
+        db, user_id=current_admin["id"], username=current_admin["username"],
+        action="admin_update_role", target=str(user_id),
+        detail={"role": req.role}, request=request,
+    )
     return {"status": "success", "user_id": user_id, "role": req.role}
 
 
@@ -1139,6 +1211,7 @@ def admin_update_user_role(
 def admin_update_user_active(
     user_id: int,
     req: UserActiveUpdate,
+    request: Request,
     current_admin: Dict[str, Any] = Depends(get_current_admin_user),
     db=Depends(get_db),
 ):
@@ -1159,6 +1232,11 @@ def admin_update_user_active(
         cursor.execute("UPDATE users SET is_active=%s WHERE id=%s", (req.is_active, user_id))
 
     print(f"[AUDIT] {current_admin['username']} set user {user_id} active={req.is_active}")
+    audit_log.record(
+        db, user_id=current_admin["id"], username=current_admin["username"],
+        action="admin_update_active", target=str(user_id),
+        detail={"is_active": req.is_active}, request=request,
+    )
     return {"status": "success", "user_id": user_id, "is_active": req.is_active}
 
 
@@ -1170,6 +1248,41 @@ def get_usage_today(current_user: Dict[str, Any] = Depends(get_current_active_us
     usage["budget"] = budget
     usage["remaining"] = max(budget - usage["total_tokens"], 0) if budget > 0 else None
     return usage
+
+
+@app.get("/api/admin/audit")
+def admin_list_audit(
+    limit: int = 100,
+    offset: int = 0,
+    action: Optional[str] = None,
+    current_admin: Dict[str, Any] = Depends(get_current_admin_user),
+    db=Depends(get_db),
+):
+    """Admin audit trail, newest first (optionally filtered by action)."""
+    limit = min(max(limit, 1), 500)
+    offset = max(offset, 0)
+    with db.cursor() as cursor:
+        if action:
+            cursor.execute(
+                """SELECT id, user_id, username, action, target, detail, ip, created_at
+                   FROM audit_events WHERE action=%s
+                   ORDER BY id DESC LIMIT %s OFFSET %s""",
+                (action, limit, offset),
+            )
+        else:
+            cursor.execute(
+                """SELECT id, user_id, username, action, target, detail, ip, created_at
+                   FROM audit_events ORDER BY id DESC LIMIT %s OFFSET %s""",
+                (limit, offset),
+            )
+        rows = cursor.fetchall()
+    for row in rows:
+        if isinstance(row.get("detail"), str):
+            try:
+                row["detail"] = json.loads(row["detail"])
+            except ValueError:
+                pass
+    return {"events": rows, "limit": limit, "offset": offset}
 
 
 @app.get("/api/llm/provider")
@@ -1381,6 +1494,7 @@ def update_log_record_status(
     status: str,
     current_user: Dict[str, Any] = Depends(get_current_active_user),
 ):
+    require_write(current_user)
     allowed_statuses = {"unresolved", "resolved", "ignored"}
     if status not in allowed_statuses:
         raise HTTPException(status_code=400, detail="Invalid status")
@@ -1403,6 +1517,7 @@ def update_log_record_status(
 
 @app.delete("/api/log-records/{record_id}")
 def delete_log_record(record_id: int, current_user: Dict[str, Any] = Depends(get_current_active_user)):
+    require_write(current_user)
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
@@ -1472,6 +1587,7 @@ def create_chat_history(
     payload: ChatHistoryCreate,
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     title = (payload.title or "新对话").strip()[:10]
     messages_json = json.dumps([m.dict() for m in payload.messages], ensure_ascii=False)
 
@@ -1500,6 +1616,7 @@ def delete_chat_history(
     history_id: int,
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
@@ -1523,6 +1640,7 @@ def update_chat_history(
     payload: ChatHistoryUpdate,
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     title = (payload.title or "").strip()
     safe_title = title[:10] if title else None
     messages_json = json.dumps([m.dict() for m in payload.messages], ensure_ascii=False)
@@ -1836,6 +1954,7 @@ async def phishing_analyzer(
     req: PhishingAnalyzeRequest,
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     if not req.content or not req.content.strip():
         raise HTTPException(status_code=400, detail="邮件内容不能为空")
 
@@ -1890,6 +2009,7 @@ async def rule_generator(
     req: RuleGeneratorRequest,
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     if not req.requirement or not req.requirement.strip():
         raise HTTPException(status_code=400, detail="需求描述不能为空")
 
@@ -1994,6 +2114,7 @@ async def code_vulnerability_scanner(
     req: CodeAuditRequest,
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     if not req.code or not req.code.strip():
         raise HTTPException(status_code=400, detail="代码内容不能为空")
 
@@ -2044,6 +2165,7 @@ async def scan_report_explainer(
     req: ReportExplainRequest,
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     if not req.content or not req.content.strip():
         raise HTTPException(status_code=400, detail="报告内容不能为空")
 
@@ -2089,6 +2211,7 @@ async def threat_intel_enrich(
     req: ThreatIntelEnrichRequest,
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     del current_user  # 保留鉴权，避免未登录调用
     ioc_raw = (req.ioc or "").strip()
     if not ioc_raw:
@@ -2190,6 +2313,7 @@ async def threat_intel_report(
     req: ThreatIntelReportRequest,
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     provider = get_user_provider(current_user)
     ioc = (req.ioc or "").strip()
     detected_type = (req.detected_type or "").strip().lower()
@@ -2301,6 +2425,7 @@ async def upload_file(
     db=Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     """
     文件上传接口
     mode 参数:
@@ -2551,6 +2676,7 @@ def delete_knowledge_file(
     db=Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
+    require_write(current_user)
     """删除指定文件（同时清理数据库记录和向量库数据）"""
     try:
         with db.cursor() as cursor:

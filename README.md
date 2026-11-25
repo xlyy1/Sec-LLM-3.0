@@ -370,6 +370,7 @@ curl -N http://localhost:8000/api/agent/<session_id>/stream \
 | GET/POST | `/api/admin/users` | 用户列表 / 创建用户（admin） |
 | PUT | `/api/admin/users/{id}/role` | 修改角色（admin） |
 | PUT | `/api/admin/users/{id}/active` | 启用/停用账号（admin） |
+| GET | `/api/admin/audit` | 审计事件（登录、建号、改角色、扫描提交） |
 | POST | `/api/chat` | 流式 AI 对话（含 RAG） |
 | POST | `/api/upload` | 日志分析 / RAG 上传 |
 | POST | `/api/security-tools/phishing-analyzer` | 钓鱼邮件鉴定 |
@@ -543,6 +544,8 @@ score = 100 - (12×Critical未处置 + 8×High未处置 + 3×Medium未处置 + 1
 | `viewer` | 只读（会话列表、状态、报告、历史） |
 
 - 管理端接口：`GET/POST /api/admin/users`、`PUT /api/admin/users/{id}/role`、`PUT /api/admin/users/{id}/active`，均要求 admin。
+- 登录成功/失败、创建用户、改角色、启停账号、提交 Agent 任务写入 `audit_events`；`GET /api/admin/audit` 可查（含操作者、目标、IP、时间）。
+- 写接口（上传、知识库删除、聊天历史写、日志状态、安全工具、Agent、chat）统一要求 operator/admin，viewer 只读。
 - 不能修改自己的管理员角色，也不能停用最后一个启用中的管理员；旧账号的 `user` 角色按 `operator` 处理。
 - Web 管理页：`/admin/users`（角色下拉、启用/停用）。
 

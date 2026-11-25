@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from agents.orchestrator import cancel_agent, get_session, get_session_event, list_sessions as list_agent_sessions, start_agent
 from config import settings
 from core import state as shared_state
+from core import audit as audit_log
 from core.auth.dependencies import get_current_user_or_skill, get_db
 from core.auth.rbac import require_write
 
@@ -100,6 +101,15 @@ async def run_agent_task(
     }
     try:
         session_id = await start_agent(task_dict, user_id=current_user["id"])
+        audit_log.record(
+            db,
+            user_id=current_user["id"],
+            username=current_user.get("username", ""),
+            action="agent_run",
+            target=req.target,
+            detail={"task_type": req.task_type, "session_id": session_id},
+            request=request,
+        )
         return AgentTaskResponse(
             session_id=session_id,
             status="running",
