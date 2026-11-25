@@ -57,7 +57,7 @@ def preflight(image=DEFAULT_IMAGE):
     for command in (["docker", "info", "--format", "{{.OSType}}"],
                     ["docker", "image", "inspect", image, "--format", "{{.Id}}"]):
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=True)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=True)
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError("RSI Docker engine/image unavailable; build sandbox/rsi/Dockerfile first") from error
         if command[1] == "info" and result.stdout.strip() != "linux":
