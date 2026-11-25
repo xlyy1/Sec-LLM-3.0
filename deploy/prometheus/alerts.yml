@@ -1,0 +1,48 @@
+# Prometheus alert rules for the Sec-LLM API.
+# Load with: prometheus --config.file=prometheus.yml (rule_files: alerts.yml)
+groups:
+  - name: sec-llm-api
+    rules:
+      - alert: SecLlmApiDown
+        expr: up{job="sec-llm-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Sec-LLM API is not scrapeable"
+          description: "{{ $labels.instance }} has been down for more than 2 minutes."
+
+      - alert: SecLlmHighErrorRate
+        expr: |
+          sum(rate(sec_llm_http_requests_total{status=~"5.."}[5m]))
+            /
+          clamp_min(sum(rate(sec_llm_http_requests_total[5m])), 1)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sec-LLM 5xx rate above 5%"
+          description: "5xx ratio is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+      - alert: SecLlmP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(sec_llm_http_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sec-LLM p95 latency above 2s"
+          description: "p95 latency is {{ $value }}s over the last 5 minutes."
+
+      - alert: SecLlmMetricsMissing
+        expr: absent(sec_llm_http_requests_total)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sec-LLM metrics disappeared"
+          description: "No sec_llm_http_requests_total samples for 5 minutes; check the /metrics endpoint and scrape config."

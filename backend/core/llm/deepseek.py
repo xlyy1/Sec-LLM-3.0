@@ -6,6 +6,7 @@ import httpx
 
 from config import settings
 from core.llm.base import LLMProvider
+from core.llm.usage import record_usage
 
 
 class DeepSeekProvider(LLMProvider):
@@ -41,7 +42,14 @@ class DeepSeekProvider(LLMProvider):
                 json=payload,
             )
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            body = resp.json()
+            usage = body.get("usage") or {}
+            record_usage(
+                self.model_name,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
+            return body["choices"][0]["message"]["content"]
 
     async def stream(
         self,
@@ -52,9 +60,11 @@ class DeepSeekProvider(LLMProvider):
             "model": self.model_name,
             "messages": messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": temperature,
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        recorded = False
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(120.0, connect=10.0)
@@ -88,6 +98,14 @@ class DeepSeekProvider(LLMProvider):
                         chunk = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    usage = chunk.get("usage")
+                    if usage and not recorded:
+                        record_usage(
+                            self.model_name,
+                            usage.get("prompt_tokens", 0),
+                            usage.get("completion_tokens", 0),
+                        )
+                        recorded = True
                     choices = chunk.get("choices") or []
                     if choices:
                         delta = choices[0].get("delta") or {}

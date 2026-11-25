@@ -17,6 +17,7 @@ import {
 import LLMProviderToggle from '@/components/LLMProviderToggle';
 import {
   enrichThreatIntel,
+  logout,
   type ThreatIntelEnrichResponse,
   type ThreatIntelIocType,
   type UserInfo,
@@ -78,6 +79,7 @@ export default function ThreatIntelAgentPage() {
   }, [router]);
 
   const handleLogout = () => {
+    void logout();
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     router.push('/login');

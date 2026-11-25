@@ -1,0 +1,81 @@
+name: Supply Chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  dependency-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: python -m pip install pip-audit
+      - name: Audit pinned backend dependencies
+        # Report-only for now: the lock file is updated through Dependabot.
+        run: |
+          pip-audit -r backend/requirements.lock.txt --format json -o pip-audit.json || true
+          python - <<'PY'
+          import json, pathlib
+          path = pathlib.Path("pip-audit.json")
+          if not path.exists():
+              print("pip-audit produced no report")
+              raise SystemExit(0)
+          data = json.loads(path.read_text())
+          deps = data.get("dependencies", data if isinstance(data, list) else [])
+          print(f"audited {len(deps)} dependencies")
+          PY
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: pip-audit-report
+          path: pip-audit.json
+
+  sbom:
+    name: Generate SPDX SBOM
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: true
+          artifact-name: sbom-spdx
+
+  image-scan:
+    name: Build and scan backend image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build backend image
+        run: docker build -t sec-llm-backend:ci ./backend
+      - name: Trivy image scan (HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: sec-llm-backend:ci
+          format: sarif
+          output: trivy-backend.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-backend.sarif
+          category: trivy-backend

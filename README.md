@@ -138,14 +138,40 @@ sec-llm-4.0/
 
 ### 环境要求
 
-- Python 3.10+
+- Python 3.12+
 - Node.js 18+
 - MySQL 8.x
 - Ollama（本地模型：`llama3:8b` + `nomic-embed-text`）
 - Docker（可选，用于沙箱工具执行）
 - DeepSeek API Key（可选，启用云端引擎）
 
-### 1. 克隆并安装
+### 0. 一键启动（Docker Compose，推荐）
+
+需要 Docker Engine / Docker Desktop 与 Compose v2.24+；本机不需要 Python、Node、MySQL。
+
+```bash
+cp .env.compose.example .env      # 至少改掉 INITIAL_ADMIN_PASSWORD 和数据库密码
+docker compose up -d --build --wait
+```
+
+| 服务 | 地址 |
+|------|------|
+| Web 前端 | `http://localhost:3000` |
+| API 文档 | `http://localhost:8000/docs` |
+| 健康检查 | `http://localhost:8000/healthz` |
+| 就绪检查 | `http://localhost:8000/readyz` |
+| Prometheus 指标 | `http://localhost:8000/metrics` |
+
+- MySQL 数据在 `mysql_data` 卷；Agent 数据、证据、临时文件分别在 `backend_data`、`backend_artifacts`、`backend_temp`、`backend_uploads` 卷。
+- Redis 承载跨 Worker 的登录失败计数（`REDIS_URL`，默认 `redis://redis:6379/0`）；留空时退回进程内计数，单副本仍可运行。
+- `backend/models` 以只读方式挂载到容器；没有本地模型时会回退到 Ollama（`OLLAMA_BASE_URL`，Docker Desktop 默认走 `host.docker.internal:11434`）。
+- 安全工具容器复用本机 Docker：先 `docker compose --profile sandbox build sandbox`，`shell_exec` 等工具才能启动 `sec-llm-sandbox` 镜像。
+- 构建阶段需要代理时，把代理传给 BuildKit（不会写进镜像）：
+  `docker compose build --build-arg HTTPS_PROXY=http://host.docker.internal:7897 --build-arg HTTP_PROXY=http://host.docker.internal:7897`
+- 受限网络：如果 `docker pull` 超时但容器能访问宿主机代理，先把 Docker Desktop 的代理改为 `http://host.docker.internal:<端口>`（`127.0.0.1` 在 Docker 虚拟机里指向它自己）；仍不可用时，在有网机器上 `docker save` 基础镜像，再 `docker load` 导入。
+- 停止：`docker compose down`；连同数据卷一起删除：`docker compose down -v`。
+
+### 1. 克隆并安装（不使用 Docker 时）
 
 ```bash
 git clone https://github.com/Mengxun326/Sec-LLM-3.0.git
@@ -336,7 +362,14 @@ curl -N http://localhost:8000/api/agent/<session_id>/stream \
 | 方法 | 端点 | 说明 |
 |------|------|------|
 | POST | `/api/register` | 用户注册 |
-| POST | `/api/login` | 用户登录 |
+| POST | `/api/login` | 用户登录（返回 access + refresh） |
+| POST | `/api/auth/refresh` | 轮换 refresh token（Cookie 或 JSON body） |
+| POST | `/api/auth/logout` | 撤销当前 refresh 并清 Cookie |
+| POST | `/api/auth/logout-all` | 撤销该用户全部会话（需登录） |
+| GET | `/api/usage/today` | 当前用户今日 token 用量与预算 |
+| GET/POST | `/api/admin/users` | 用户列表 / 创建用户（admin） |
+| PUT | `/api/admin/users/{id}/role` | 修改角色（admin） |
+| PUT | `/api/admin/users/{id}/active` | 启用/停用账号（admin） |
 | POST | `/api/chat` | 流式 AI 对话（含 RAG） |
 | POST | `/api/upload` | 日志分析 / RAG 上传 |
 | POST | `/api/security-tools/phishing-analyzer` | 钓鱼邮件鉴定 |
@@ -379,9 +412,9 @@ export SEC_LLM_SKILL_API_KEY="your-secure-key"
 | 层 | 技术 |
 |---|------|
 | **Agent 引擎** | LangGraph 1.2, LangChain |
-| **后端** | Python 3.10+, FastAPI, PyMySQL, SQLAlchemy |
+| **后端** | Python 3.12+, FastAPI, PyMySQL, SQLAlchemy |
 | **LLM** | Ollama (llama3:8b), DeepSeek API, OpenAI SDK |
-| **前端** | Next.js 14, React 18, TypeScript, Tailwind CSS |
+| **前端** | Next.js 15, React 18, TypeScript, Tailwind CSS |
 | **向量数据库** | ChromaDB + OllamaEmbeddings (nomic-embed-text) |
 | **数据库** | MySQL 8.x, Alembic 迁移 |
 | **浏览器自动化** | Playwright (Chromium) |
@@ -480,6 +513,47 @@ score = 100 - (12×Critical未处置 + 8×High未处置 + 3×Medium未处置 + 1
 
 ---
 
+## 可观测性
+
+- **日志**：stdout 单行 JSON（`ts` / `level` / `service` / `logger` / `message` / `request_id`；请求行另有 `method` / `path` / `status` / `duration_ms`），`docker compose logs backend` 直接可读。
+- **请求关联**：每个响应带 `X-Request-ID`；客户端可自带，服务端会清洗后回传，日志里能按该 ID 串起一次请求。
+- **健康检查**：`GET /healthz` 只表示进程存活，不碰依赖；`GET /readyz` 检查 MySQL、数据目录与 Redis（Redis 仅作为降级状态报告，不单独让整个服务不可用），失败返回 503 和逐项原因。
+- **共享状态**：登录失败计数在配置 `REDIS_URL` 后写入 Redis，多个 API Worker/副本共用同一个窗口；Redis 不可用时自动退回进程内计数，不阻塞登录。
+- **集群事件**：Agent 进度通过 Redis Pub/Sub（`sec-llm:session:<id>`）唤醒跨 Worker 的 SSE，不再靠每秒轮询数据库；Redis 不可用时退回进程内事件 + 1s 轮询。
+- **全局并发**：Agent 槽位用 Redis ZSET 维护，多个 Worker 共享 `AGENT_MAX_CONCURRENT`，任务结束释放，超时槽位自动过期；无 Redis 时退回进程内信号量。
+- **指标**：`GET /metrics` 暴露 `sec_llm_http_requests_total`、`sec_llm_http_request_duration_seconds`、`sec_llm_agent_tasks_running`。
+- **告警**：`deploy/prometheus/alerts.yml`（API down、5xx 比例、p95 延迟、指标消失），配合 `deploy/prometheus/prometheus.yml` 使用。
+- `/metrics` 目前不带鉴权，只应暴露给内网 Prometheus；公网部署时用反向代理限制来源，或后续加 `METRICS_TOKEN`。
+
+## 认证与会话
+
+- 登录返回 **15 分钟 access token** + **7 天 refresh token**；refresh 同时写入 `HttpOnly; SameSite=Lax; Path=/api/auth` 的 Cookie，浏览器自动携带，CLI/OpenClaw 可直接使用 JSON 里的 `refresh_token`。
+- `POST /api/auth/refresh` 每次轮换 refresh：旧 token 立即作废；检测到已轮换 token 被重放时，会撤销整个登录族（family），强制重新登录。
+- `POST /api/auth/logout` 撤销当前 refresh **并立即拉黑当前 access token**（jti 拒绝列表）；`POST /api/auth/logout-all` 撤销该用户全部 refresh 与 access（用户级时间截断），无需等 15 分钟过期。
+- 检测到 refresh 重放时，除了撤销登录族，也会让该用户已签发的 access token 立即失效。
+- 每个用户按 UTC 日计数 `DAILY_AGENT_QUOTA` / `DAILY_CHAT_QUOTA`（0 = 不限），超额返回 429 + `Retry-After`；计数写入 Redis，跨 Worker 共享。
+- `REFRESH_COOKIE_SECURE=true` 只应在 HTTPS 下开启。Redis 不可用时拒绝列表退回进程内，单副本仍可用，但多副本下撤销不共享。
+
+## 角色与用户管理
+
+| 角色 | 能力 |
+|------|------|
+| `admin` | 全部能力 + 用户/角色管理 |
+| `operator` | 提交扫描、对话、上传、取消任务 |
+| `viewer` | 只读（会话列表、状态、报告、历史） |
+
+- 管理端接口：`GET/POST /api/admin/users`、`PUT /api/admin/users/{id}/role`、`PUT /api/admin/users/{id}/active`，均要求 admin。
+- 不能修改自己的管理员角色，也不能停用最后一个启用中的管理员；旧账号的 `user` 角色按 `operator` 处理。
+- Web 管理页：`/admin/users`（角色下拉、启用/停用）。
+
+## Token 计量与成本
+
+- DeepSeek 读取响应里的 `usage.prompt_tokens / completion_tokens`（流式开启 `stream_options.include_usage`）；Ollama 读取 `prompt_eval_count / eval_count`。
+- 按 `用户 + UTC 日` 聚合到 Redis，`GET /api/usage/today` 返回 prompt/completion/total、请求数与可选的美元估算。
+- `DAILY_TOKEN_BUDGET > 0` 时，每次 chat / agent 提交前检查当日总 token，超额返回 429；`LLM_COST_PER_1K_PROMPT/COMPLETION` 只用于展示估算，不参与扣费。
+- Prometheus 指标：`sec_llm_llm_tokens_total{model,kind}`，可直接做「每用户/模型 token 趋势」面板。
+- Agent 图内所有 `single_shot_completion` 通过 ContextVar 归因到会话发起者；工具在子线程中执行时也会继承该上下文。
+
 ## 安全提示
 
 - 首次启动必须配置 `INITIAL_ADMIN_PASSWORD`（至少 12 位）；已有管理员不会在启动时被重新激活
@@ -501,3 +575,7 @@ score = 100 - (12×Critical未处置 + 8×High未处置 + 3×Medium未处置 + 1
   <b>Sec-LLM 4.0</b> — AI Agent 网络安全平台<br>
   第一作者：<b>雨思晨</b> | 开发团队：<b>灵犀网卫</b>
 </p>
+
+## License
+
+MIT，见 [LICENSE](LICENSE)。

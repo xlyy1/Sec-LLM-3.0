@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  手工构造的 nmap 7.94 `nmap -sV -F -oX -` 输出样例，用于解析回归测试。
+
+  这不是从真实扫描采集的：构造环境里 Docker 守护进程未运行，无法启动沙箱
+  执行 nmap。字段名、结构与 nmap 7.x 的 DTD 一致，数值取自常见真实指纹
+  （Apache httpd 2.4.49 是 CVE-2021-41773 的受影响版本）。
+  有条件时应重新采集一份真实输出替换本文件，并保留源扫描命令。
+-->
+<nmaprun scanner="nmap" args="nmap -sV -F -oX - 192.0.2.10" start="1750000000" startstr="Tue Nov 25 09:00:00 2026" version="7.94" xmloutputversion="1.05">
+  <scaninfo type="syn" protocol="tcp" numservices="100" services="21-25,80,443,3306"/>
+  <verbose level="0"/>
+  <debugging level="0"/>
+  <host starttime="1750000001" endtime="1750000042">
+    <status state="up" reason="arp-response" reason_ttl="0"/>
+    <address addr="192.0.2.10" addrtype="ipv4"/>
+    <address addr="00:11:22:33:44:55" addrtype="mac" vendor="Example Vendor"/>
+    <hostnames>
+      <hostname name="demo.internal" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="64"/>
+        <service name="ssh" product="OpenSSH" version="8.9p1" extrainfo="Ubuntu Linux; protocol 2.0" ostype="Linux" method="probed" conf="10">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="25">
+        <state state="open" reason="syn-ack" reason_ttl="64"/>
+        <service name="smtp" product="Postfix smtpd" method="probed" conf="10"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="64"/>
+        <service name="http" product="Apache httpd" version="2.4.49" extrainfo="(Unix)" method="probed" conf="10">
+          <cpe>cpe:/a:apache:http_server:2.4.49</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="64"/>
+        <service name="http" product="nginx" version="1.25.3" method="probed" conf="10"/>
+      </port>
+      <port protocol="tcp" portid="3306">
+        <state state="closed" reason="reset" reason_ttl="64"/>
+        <service name="mysql" method="table" conf="3"/>
+      </port>
+    </ports>
+  </host>
+  <runstats>
+    <finished time="1750000043" timestr="Tue Nov 25 09:00:43 2026" elapsed="43.21" summary="Nmap done" exit="success"/>
+    <hosts up="1" down="0" total="1"/>
+  </runstats>
+</nmaprun>

@@ -1,0 +1,16 @@
+{
+  "_note": "nmap 没有给出 <cpe> 时的兜底映射。条目少而精、人工维护、评审后可改。产品名按小写+折叠空白匹配；匹配不上就是 none，不做模糊匹配。P1 接入 kg.db 后必须逐条核对：CPE 的 vendor 在不同批次 NVD 数据里可能不同（例如 nginx 曾用 igor_sysoev，现多用 f5），以导入的快照为准。",
+  "by_product": {
+    "apache httpd": { "vendor": "apache", "product": "http_server" },
+    "apache tomcat": { "vendor": "apache", "product": "tomcat" },
+    "nginx": { "vendor": "f5", "product": "nginx" },
+    "openssh": { "vendor": "openbsd", "product": "openssh" },
+    "mysql": { "vendor": "oracle", "product": "mysql" },
+    "mariadb": { "vendor": "mariadb", "product": "mariadb" },
+    "postgresql db": { "vendor": "postgresql", "product": "postgresql" },
+    "redis": { "vendor": "redis", "product": "redis" },
+    "php": { "vendor": "php", "product": "php" },
+    "microsoft iis httpd": { "vendor": "microsoft", "product": "internet_information_services" },
+    "lighttpd": { "vendor": "lighttpd", "product": "lighttpd" }
+  }
+}

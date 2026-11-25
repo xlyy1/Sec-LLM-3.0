@@ -1,0 +1,10 @@
+# Build context is ./frontend
+node_modules
+.next
+out
+dist
+*.log
+.env
+.env.*
+npm-debug.log*
+.DS_Store

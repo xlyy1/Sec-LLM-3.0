@@ -4,9 +4,8 @@ import shutil
 import threading
 import time
 import asyncio
-from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 
 # --- 🔥 核心补丁：强制关闭代理 ---
 os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
@@ -14,7 +13,8 @@ os.environ['no_proxy'] = 'localhost,127.0.0.1'
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, EmailStr
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
@@ -46,6 +46,14 @@ from jose import JWTError, jwt
 
 # ================= ⚙️ 配置管理系统 (from config.py) =================
 from config import settings, normalize_provider, get_user_provider
+from core.observability import (
+    AGENT_TASKS_RUNNING,
+    RequestContextMiddleware,
+    configure_logging,
+)
+from core import state as shared_state
+
+configure_logging()
 
 
 def _mail_config_ready() -> bool:
@@ -81,6 +89,8 @@ from core.auth.dependencies import (
     get_current_user_or_skill,
     get_db,
 )
+from core.auth import tokens as auth_tokens
+from core.auth.rbac import normalize_role, require_write
 
 def get_db_connection():
     return pymysql.connect(
@@ -95,11 +105,7 @@ def get_db_connection():
     )
 
 
-# --- 登录失败限流（进程内，多 Worker 时每个 Worker 独立计数） ---
-_login_failures: Dict[str, deque] = defaultdict(deque)
-_login_failures_lock = threading.Lock()
-
-
+# --- 登录失败限流：Redis 共享计数，未配置/不可用时退回进程内窗口 ---
 def _login_key(request: Optional[Request], username: str) -> str:
     client = "unknown"
     if request is not None and request.client is not None:
@@ -108,27 +114,23 @@ def _login_key(request: Optional[Request], username: str) -> str:
 
 
 def _login_blocked(key: str) -> bool:
-    window = settings.LOGIN_FAILURE_WINDOW_SECONDS
-    now = time.time()
-    with _login_failures_lock:
-        attempts = _login_failures[key]
-        while attempts and now - attempts[0] > window:
-            attempts.popleft()
-        return len(attempts) >= settings.LOGIN_MAX_FAILURES
+    from core import state
+
+    return state.login_blocked(
+        key, settings.LOGIN_MAX_FAILURES, settings.LOGIN_FAILURE_WINDOW_SECONDS
+    )
 
 
 def _record_login_failure(key: str) -> None:
-    with _login_failures_lock:
-        _login_failures[key].append(time.time())
-        if len(_login_failures) > 10_000:  # 防止无限增长
-            cutoff = time.time() - settings.LOGIN_FAILURE_WINDOW_SECONDS
-            for stale in [k for k, v in _login_failures.items() if not v or v[-1] < cutoff]:
-                _login_failures.pop(stale, None)
+    from core import state
+
+    state.record_login_failure(key, settings.LOGIN_FAILURE_WINDOW_SECONDS)
 
 
 def _clear_login_failures(key: str) -> None:
-    with _login_failures_lock:
-        _login_failures.pop(key, None)
+    from core import state
+
+    state.clear_login_failures(key)
 
 def init_db():
     with get_db_connection() as conn:
@@ -197,6 +199,25 @@ def init_db():
             cursor.execute(
                 "UPDATE users SET llm_provider=%s WHERE llm_provider IS NULL OR llm_provider=''",
                 (normalize_provider(settings.LLM_PROVIDER),),
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS refresh_tokens (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    jti VARCHAR(64) NOT NULL UNIQUE,
+                    family_id VARCHAR(64) NOT NULL,
+                    user_id INT NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    revoked_at DATETIME NULL,
+                    replaced_by VARCHAR(64) NULL,
+                    user_agent VARCHAR(255),
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_refresh_tokens_user (user_id),
+                    INDEX idx_refresh_tokens_family (family_id),
+                    CONSTRAINT fk_refresh_tokens_user FOREIGN KEY (user_id)
+                        REFERENCES users(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
             )
             cursor.execute(
                 """
@@ -372,6 +393,7 @@ import tools.sqli           # noqa: E402
 import tools.lfi            # noqa: E402
 import tools.ssrf           # noqa: E402
 import tools.api_discovery  # noqa: E402
+import tools.cve_match      # noqa: E402
 
 # 配置 CORS：默认只放行本机前端，不再使用通配符 + 凭据的组合
 _cors_origins = [item.strip() for item in settings.CORS_ALLOW_ORIGINS.split(",") if item.strip()]
@@ -385,6 +407,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Skill-Api-Key"],
 )
+# Outermost middleware: every response carries X-Request-ID and one access log line.
+app.add_middleware(RequestContextMiddleware)
 
 # ================= 临时文件清理配置 =================
 TEMP_DIR = "temp"
@@ -446,6 +470,12 @@ async def startup_event():
         init_db()
         init_default_admin()
         from agents.orchestrator import recover_agent_sessions
+        from agents import orchestrator as _orchestrator
+
+        # Gauge is evaluated at scrape time so it always reflects this process.
+        AGENT_TASKS_RUNNING.set_function(
+            lambda: len(getattr(_orchestrator, "_running_tasks", {}))
+        )
         recovered = await recover_agent_sessions()
         if recovered:
             print(f"[Agent] Resumed {recovered} queued sessions")
@@ -498,6 +528,16 @@ async def shutdown_agent_recovery():
     warmup = getattr(app.state, "prompt_intent_warmup", None)
     if warmup is not None and not warmup.done():
         warmup.cancel()
+
+    # Drain in-flight Agent tasks so a rolling restart does not abandon scans.
+    try:
+        from agents.orchestrator import drain_running_tasks
+
+        cancelled = await drain_running_tasks(settings.AGENT_SHUTDOWN_GRACE_SECONDS)
+        if cancelled:
+            print(f"[SHUTDOWN] Cancelled {cancelled} in-flight agent task(s) after grace period")
+    except Exception as error:  # noqa: BLE001 —— 停机阶段不再抛出
+        print(f"[SHUTDOWN] Agent drain failed: {error}")
 
 # ================= 🤖 LLM 客户端初始化 =================
 # 云端客户端（有 Key 即初始化，是否使用由运行时开关控制）
@@ -559,6 +599,8 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str
     user: UserResponse
+    refresh_token: Optional[str] = None
+    expires_in: int = 0
 
 class ChatMessage(BaseModel):
     role: str
@@ -584,6 +626,22 @@ class ResendVerificationRequest(BaseModel):
 
 class LLMProviderUpdate(BaseModel):
     provider: str
+
+
+class UserRoleUpdate(BaseModel):
+    role: Literal["admin", "operator", "viewer"]
+
+
+class UserActiveUpdate(BaseModel):
+    is_active: bool
+
+
+class AdminCreateUser(BaseModel):
+    username: str
+    password: str
+    role: Literal["admin", "operator", "viewer"] = "viewer"
+    email: Optional[EmailStr] = None
+    full_name: Optional[str] = None
 
 
 class PhishingAnalyzeRequest(BaseModel):
@@ -652,10 +710,73 @@ async def send_verification_email_safe(email: str, token: str):
     except Exception as e:
         print(f"[MAIL ERROR] Failed to send verification mail to {email}: {e}")
 
-# --- 接口 1: 健康检查 ---
-@app.get("/")
+# --- 接口 1: 健康检查 ---@app.get("/")
 def health_check():
     return {"status": "online", "system": "Sec-LLM Agent Platform v4.0", "provider": settings.LLM_PROVIDER}
+
+
+@app.get("/healthz")
+def liveness():
+    """Liveness: the process can serve requests. Must not touch dependencies."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readiness():
+    """Readiness: the dependencies needed to serve traffic are usable."""
+    checks: Dict[str, Dict[str, Any]] = {}
+    ready = True
+
+    try:
+        conn = pymysql.connect(
+            host=settings.MYSQL_HOST,
+            user=settings.MYSQL_USER,
+            password=settings.MYSQL_PASSWORD,
+            database=settings.MYSQL_DB,
+            port=settings.MYSQL_PORT,
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=2,
+            read_timeout=2,
+            write_timeout=2,
+        )
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+        finally:
+            conn.close()
+        checks["mysql"] = {"status": "ok"}
+    except Exception as error:  # noqa: BLE001 —— 只回类型名，避免泄露连接串
+        checks["mysql"] = {"status": "error", "error": type(error).__name__}
+        ready = False
+
+    data_dir = os.path.dirname(VECTOR_DB_DIR) or "."
+    checks["data_dir"] = {
+        "status": "ok" if os.access(data_dir, os.W_OK) else "error",
+        "path": data_dir,
+    }
+    if checks["data_dir"]["status"] != "ok":
+        ready = False
+
+    checks["vector_store"] = {
+        "status": "loaded" if vector_store is not None else "empty",
+    }
+
+    from core import state as shared_state
+
+    checks["redis"] = {"status": shared_state.redis_status()}
+
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "checks": checks},
+    )
+
+
+@app.get("/metrics")
+def metrics():
+    """Prometheus exposition endpoint (scrape from the internal network)."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # --- 接口 2: 用户注册 ---
 @app.post("/api/register")
@@ -766,8 +887,108 @@ async def resend_verification(req: ResendVerificationRequest, db=Depends(get_db)
     return {"status": "success", "message": "验证邮件已重新发送，请查收。"}
 
 # --- 接口 3: 用户登录 ---
+_REFRESH_COOKIE = "refresh_token"
+_REFRESH_COOKIE_PATH = "/api/auth"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: Optional[str] = None
+
+
+def _set_refresh_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=_REFRESH_COOKIE,
+        value=token,
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        httponly=True,
+        samesite="lax",
+        secure=settings.REFRESH_COOKIE_SECURE,
+        path=_REFRESH_COOKIE_PATH,
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(key=_REFRESH_COOKIE, path=_REFRESH_COOKIE_PATH)
+
+
+def _refresh_token_from(req: "RefreshRequest", request: Request) -> tuple[str, bool]:
+    """Return (token, came_from_cookie)."""
+    if req.refresh_token:
+        return req.refresh_token.strip(), False
+    return (request.cookies.get(_REFRESH_COOKIE) or "").strip(), True
+
+
+def _enforce_quota(current_user: Dict[str, Any], kind: str, limit: int) -> None:
+    from core import state
+
+    allowed, used = state.consume_quota(current_user["id"], kind, limit)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"今日 {kind} 次数已达上限（{limit}），请明天再试",
+            headers={"Retry-After": "3600"},
+        )
+
+
+@app.post("/api/auth/refresh")
+def refresh_session(req: RefreshRequest, request: Request, response: Response):
+    """Rotate a refresh token (cookie for the web UI, body for CLI)."""
+    token, from_cookie = _refresh_token_from(req, request)
+    if not token:
+        raise HTTPException(status_code=401, detail="缺少 refresh token")
+    if from_cookie:
+        # SameSite=Lax already blocks cross-site POST cookies; also reject a
+        # mismatched Origin when the browser sends one.
+        origin = request.headers.get("origin")
+        if origin and origin not in _cors_origins:
+            raise HTTPException(status_code=403, detail="Origin 不被允许")
+
+    access, new_refresh, user = auth_tokens.rotate(
+        token, request.headers.get("user-agent", "")
+    )
+    _set_refresh_cookie(response, new_refresh)
+    return {
+        "access_token": access,
+        "refresh_token": new_refresh,
+        "token_type": "bearer",
+        "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "user": UserResponse(
+            id=user["id"],
+            username=user["username"],
+            email=user.get("email"),
+            full_name=user.get("full_name"),
+            role=user.get("role", "user"),
+        ),
+    }
+
+
+@app.post("/api/auth/logout")
+def logout_session(
+    req: RefreshRequest,
+    request: Request,
+    response: Response,
+    token: Optional[str] = Depends(oauth2_scheme),
+):
+    refresh_token, _ = _refresh_token_from(req, request)
+    if refresh_token:
+        auth_tokens.revoke(refresh_token)
+    # If the client sent its access token, invalidate it immediately too.
+    auth_tokens.revoke_access(token)
+    _clear_refresh_cookie(response)
+    return {"status": "success", "message": "已退出登录"}
+
+
+@app.post("/api/auth/logout-all")
+def logout_all_sessions(
+    current_user: Dict[str, Any] = Depends(get_current_active_user),
+):
+    count = auth_tokens.revoke_all(current_user["id"])
+    auth_tokens.revoke_all_access(current_user["id"])
+    return {"status": "success", "revoked": count}
+
+
 @app.post("/api/login")
-def login(req: LoginRequest, request: Request, db=Depends(get_db)):
+def login(req: LoginRequest, request: Request, response: Response, db=Depends(get_db)):
     """用户登录接口（带失败次数限流）"""
     guard_key = _login_key(request, req.username)
     if _login_blocked(guard_key):
@@ -809,14 +1030,19 @@ def login(req: LoginRequest, request: Request, db=Depends(get_db)):
     with db.cursor() as cursor:
         cursor.execute("UPDATE users SET last_login=%s WHERE id=%s", (datetime.now(timezone.utc), user["id"]))
 
-    # 生成 JWT Token
-    access_token = create_access_token(data={"sub": user["username"]})
-    
+    # 生成短时 access token + 可轮换 refresh token（refresh 同时写入 httpOnly Cookie）
+    access_token, refresh_token = auth_tokens.issue_session(
+        user["id"], user["username"], request.headers.get("user-agent", "")
+    )
+    _set_refresh_cookie(response, refresh_token)
+
     print(f"[OK] 用户登录: {user['username']}")
-    
+
     return TokenResponse(
         access_token=access_token,
         token_type="bearer",
+        refresh_token=refresh_token,
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=UserResponse(
             id=user["id"],
             username=user["username"],
@@ -837,6 +1063,113 @@ def get_me(current_user: Dict[str, Any] = Depends(get_current_active_user)):
         full_name=current_user.get("full_name"),
         role=current_user.get("role", "user")
     )
+
+
+@app.post("/api/admin/users")
+def admin_create_user(
+    req: AdminCreateUser,
+    current_admin: Dict[str, Any] = Depends(get_current_admin_user),
+    db=Depends(get_db),
+):
+    problem = password_problem(req.password, req.username, settings.USER_PASSWORD_MIN_LENGTH)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+
+    with db.cursor() as cursor:
+        cursor.execute(
+            "SELECT id FROM users WHERE username=%s OR (email IS NOT NULL AND email=%s)",
+            (req.username, req.email),
+        )
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="用户名或邮箱已存在")
+        cursor.execute(
+            """INSERT INTO users (username, hashed_password, email, full_name, role, is_active)
+               VALUES (%s, %s, %s, %s, %s, TRUE)""",
+            (req.username, get_password_hash(req.password), req.email, req.full_name, req.role),
+        )
+        user_id = cursor.lastrowid
+
+    print(f"[AUDIT] {current_admin['username']} created user {req.username} role={req.role}")
+    return {"status": "success", "user_id": user_id, "role": req.role}
+
+
+@app.get("/api/admin/users")
+def admin_list_users(
+    current_admin: Dict[str, Any] = Depends(get_current_admin_user),
+    db=Depends(get_db),
+):
+    """Admin-only user directory for role assignment."""
+    with db.cursor() as cursor:
+        cursor.execute(
+            """SELECT id, username, email, full_name, role, is_active, created_at, last_login
+               FROM users ORDER BY id"""
+        )
+        users = cursor.fetchall()
+    return {"users": users, "roles": ["admin", "operator", "viewer"]}
+
+
+@app.put("/api/admin/users/{user_id}/role")
+def admin_update_user_role(
+    user_id: int,
+    req: UserRoleUpdate,
+    current_admin: Dict[str, Any] = Depends(get_current_admin_user),
+    db=Depends(get_db),
+):
+    if user_id == current_admin["id"] and req.role != "admin":
+        raise HTTPException(status_code=400, detail="不能修改自己的管理员角色")
+
+    with db.cursor() as cursor:
+        cursor.execute("SELECT id, role FROM users WHERE id=%s", (user_id,))
+        target = cursor.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        if normalize_role(target["role"]) == "admin" and req.role != "admin":
+            cursor.execute("SELECT COUNT(*) AS cnt FROM users WHERE role='admin' AND is_active=TRUE")
+            if cursor.fetchone()["cnt"] <= 1:
+                raise HTTPException(status_code=400, detail="至少保留一个启用状态的管理员")
+
+        cursor.execute("UPDATE users SET role=%s WHERE id=%s", (req.role, user_id))
+
+    print(f"[AUDIT] {current_admin['username']} changed role of user {user_id} to {req.role}")
+    return {"status": "success", "user_id": user_id, "role": req.role}
+
+
+@app.put("/api/admin/users/{user_id}/active")
+def admin_update_user_active(
+    user_id: int,
+    req: UserActiveUpdate,
+    current_admin: Dict[str, Any] = Depends(get_current_admin_user),
+    db=Depends(get_db),
+):
+    if user_id == current_admin["id"] and not req.is_active:
+        raise HTTPException(status_code=400, detail="不能停用当前登录的管理员")
+
+    with db.cursor() as cursor:
+        cursor.execute("SELECT id, role, is_active FROM users WHERE id=%s", (user_id,))
+        target = cursor.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        if not req.is_active and normalize_role(target["role"]) == "admin":
+            cursor.execute("SELECT COUNT(*) AS cnt FROM users WHERE role='admin' AND is_active=TRUE")
+            if cursor.fetchone()["cnt"] <= 1:
+                raise HTTPException(status_code=400, detail="至少保留一个启用状态的管理员")
+
+        cursor.execute("UPDATE users SET is_active=%s WHERE id=%s", (req.is_active, user_id))
+
+    print(f"[AUDIT] {current_admin['username']} set user {user_id} active={req.is_active}")
+    return {"status": "success", "user_id": user_id, "is_active": req.is_active}
+
+
+@app.get("/api/usage/today")
+def get_usage_today(current_user: Dict[str, Any] = Depends(get_current_active_user)):
+    """Today's LLM token usage for the current user (UTC day)."""
+    usage = shared_state.usage_today(current_user["id"])
+    budget = settings.DAILY_TOKEN_BUDGET
+    usage["budget"] = budget
+    usage["remaining"] = max(budget - usage["total_tokens"], 0) if budget > 0 else None
+    return usage
 
 
 @app.get("/api/llm/provider")
@@ -1590,6 +1923,7 @@ Rules:
                     "model": settings.DEEPSEEK_MODEL_NAME,
                     "messages": model_messages,
                     "stream": True,
+                    "stream_options": {"include_usage": True},
                     "temperature": 0.2,
                 }
                 async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -1608,6 +1942,14 @@ Rules:
                                 chunk = json.loads(data)
                             except Exception:
                                 continue
+                            usage = chunk.get("usage")
+                            if usage:
+                                shared_state.add_token_usage(
+                                    current_user["id"],
+                                    settings.DEEPSEEK_MODEL_NAME,
+                                    usage.get("prompt_tokens", 0),
+                                    usage.get("completion_tokens", 0),
+                                )
                             choices = chunk.get("choices") or []
                             if not choices:
                                 continue
@@ -1886,6 +2228,7 @@ async def threat_intel_report(
                     "model": settings.DEEPSEEK_MODEL_NAME,
                     "messages": model_messages,
                     "stream": True,
+                    "stream_options": {"include_usage": True},
                     "temperature": 0.2,
                 }
                 async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -1904,6 +2247,14 @@ async def threat_intel_report(
                                 chunk = json.loads(data)
                             except Exception:
                                 continue
+                            usage = chunk.get("usage")
+                            if usage:
+                                shared_state.add_token_usage(
+                                    current_user["id"],
+                                    settings.DEEPSEEK_MODEL_NAME,
+                                    usage.get("prompt_tokens", 0),
+                                    usage.get("completion_tokens", 0),
+                                )
                             choices = chunk.get("choices") or []
                             if not choices:
                                 continue
@@ -2275,6 +2626,14 @@ async def chat(
     current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
 ):
     active_provider = get_user_provider(current_user)
+    require_write(current_user)
+    if shared_state.token_budget_exceeded(current_user["id"], settings.DAILY_TOKEN_BUDGET):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"今日 token 预算（{settings.DAILY_TOKEN_BUDGET}）已用完，请明天再试",
+            headers={"Retry-After": "3600"},
+        )
+    _enforce_quota(current_user, "chat", settings.DAILY_CHAT_QUOTA)
     provider_model_name = settings.OLLAMA_MODEL_NAME if active_provider == "local" else settings.DEEPSEEK_MODEL_NAME
     # 默认不把用户提问写进日志（可能含敏感信息）；需要排障时用 LOG_USER_QUERIES=true 打开
     if settings.LOG_USER_QUERIES:
@@ -2476,6 +2835,7 @@ Reference Material (Use only if relevant to security):
                     "model": settings.DEEPSEEK_MODEL_NAME,
                     "messages": model_messages,
                     "stream": True,
+                    "stream_options": {"include_usage": True},
                     "temperature": 0.6,
                 }
 
@@ -2496,6 +2856,14 @@ Reference Material (Use only if relevant to security):
                                 chunk = json.loads(data)
                             except Exception:
                                 continue
+                            usage = chunk.get("usage")
+                            if usage:
+                                shared_state.add_token_usage(
+                                    current_user["id"],
+                                    settings.DEEPSEEK_MODEL_NAME,
+                                    usage.get("prompt_tokens", 0),
+                                    usage.get("completion_tokens", 0),
+                                )
                             choices = chunk.get("choices") or []
                             if not choices:
                                 continue
@@ -2520,6 +2888,13 @@ Reference Material (Use only if relevant to security):
                             if line:
                                 try:
                                     chunk = json.loads(line)
+                                    if chunk.get("done"):
+                                        shared_state.add_token_usage(
+                                            current_user["id"],
+                                            settings.OLLAMA_MODEL_NAME,
+                                            chunk.get("prompt_eval_count", 0),
+                                            chunk.get("eval_count", 0),
+                                        )
                                     content = chunk.get("message", {}).get("content", "")
                                     if content:
                                         yield content

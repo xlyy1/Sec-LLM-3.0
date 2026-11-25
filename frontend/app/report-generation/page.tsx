@@ -22,7 +22,7 @@ import {
   Wrench,
   Activity,
 } from 'lucide-react';
-import { type AnalysisResult } from '@/lib/api';
+import { logout, type AnalysisResult } from '@/lib/api';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 
@@ -106,6 +106,7 @@ export default function ReportGenerationPage() {
   }, [router]);
 
   const handleLogout = () => {
+    void logout();
     localStorage.removeItem('token');
     router.push('/login');
   };

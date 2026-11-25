@@ -2,6 +2,7 @@
 from typing import Any, Dict
 
 from agents.collaboration import Blackboard
+from core.kg.nmap_parse import parse_nmap_xml
 from core.llm.router import single_shot_completion
 from core.safety.prompt_injection import validate_model_output, wrap_untrusted_data, wrap_untrusted_text
 from tools.registry import get_tools_by_category, invoke_tool
@@ -24,6 +25,16 @@ Instructions:
    - forms: list of forms with inputs
 4. Output a JSON summary: {{"phase": "recon_complete", "discoveries": [...], "next_targets": [...]}}
 """
+
+
+def _render_services(services: list[dict]) -> str:
+    """把解析出的服务渲染成可读文本，替代原来的 nmap 文本输出。"""
+    lines = []
+    for item in services:
+        banner = " ".join(part for part in (item.get("product"), item.get("version")) if part)
+        line = f"{item.get('port')}/{item.get('protocol') or 'tcp'} open {item.get('service') or 'unknown'}"
+        lines.append(f"{line} {banner}".strip())
+    return "\n".join(lines)
 
 
 async def run_recon(target: str, provider: str, blackboard: Blackboard) -> Dict[str, Any]:
@@ -105,10 +116,18 @@ async def run_recon(target: str, provider: str, blackboard: Blackboard) -> Dict[
         findings.append({"type": "skipped", "tool": "shell_exec", "reason": "docker not available"})
     else:
         try:
-            result = await invoke_tool("shell_exec", command=f"nmap -sV -F {scan_target}", timeout=120)
+            # -oX - 让 nmap 把 XML 打到 stdout；多数服务会因此带上 <cpe> 标签。
+            result = await invoke_tool("shell_exec", command=f"nmap -sV -F -oX - {scan_target}", timeout=120)
             if isinstance(result, dict) and result.get("exit_code") == 0:
-                blackboard.publish("nmap_output", result.get("stdout", ""), "recon")
-                findings.append({"type": "port_scan", "output": result.get("stdout", "")[:2000]})
+                raw = result.get("stdout", "") or ""
+                services = parse_nmap_xml(raw).get("services") or []
+                summary = _render_services(services)
+                blackboard.publish("nmap_xml", raw, "recon")
+                blackboard.publish("nmap_services", services, "recon")
+                # 解析失败或没有开放端口时退回原始输出，保持"是否扫到主机"的旧判断不变。
+                blackboard.publish("nmap_output", summary or raw[:20000], "recon")
+                findings.append({"type": "port_scan", "services": len(services),
+                                 "output": (summary or raw)[:2000]})
             else:
                 findings.append({"type": "error", "tool": "shell_exec", "error": str(result.get("stderr", "Port scan failed"))[:1000] if isinstance(result, dict) else "Port scan returned no result"})
         except Exception as e:

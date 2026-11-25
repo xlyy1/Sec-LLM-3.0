@@ -108,7 +108,8 @@ def checks_for(assets: Dict[str, Any], discoveries: Dict[str, Any]) -> List[Dict
             "但越权(IDOR)测试尚未实现"
         )
     if HOST in types:
-        skipped.append("host：只做了 nmap 服务识别，未做 CVE 匹配")
+        # 端口识别出来了就做 CVE 关联；匹配本身在 exploit 阶段批量执行一次。
+        checks.append({"check": "cve_match", "via": "nmap"})
     skipped.append("SSRF 仅覆盖错误回显型；带外（DNS/HTTP 回连）未覆盖")
     skipped.append("xxe / 反序列化：缺少专用检测器")
     skipped.append("POST 仅测试 urlencoded 表单；JSON body 与 multipart 未纳入")

@@ -9,7 +9,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agents.orchestrator import cancel_agent, get_session, get_session_event, list_sessions as list_agent_sessions, start_agent
+from config import settings
+from core import state as shared_state
 from core.auth.dependencies import get_current_user_or_skill, get_db
+from core.auth.rbac import require_write
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -70,6 +73,24 @@ async def run_agent_task(
     db=Depends(get_db),
 ):
     """Submit a new agent task for execution."""
+    require_write(current_user)
+    if shared_state.token_budget_exceeded(
+        current_user["id"], settings.DAILY_TOKEN_BUDGET
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail=f"今日 token 预算（{settings.DAILY_TOKEN_BUDGET}）已用完，请明天再试",
+            headers={"Retry-After": "3600"},
+        )
+    allowed, used = shared_state.consume_quota(
+        current_user["id"], "agent", settings.DAILY_AGENT_QUOTA
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"今日 agent 任务次数已达上限（{settings.DAILY_AGENT_QUOTA}），请明天再试",
+            headers={"Retry-After": "3600"},
+        )
     task_dict: Dict[str, Any] = {
         "target": req.target,
         "task_type": req.task_type,
@@ -155,31 +176,61 @@ async def stream_agent_logs(
         sent_count = 0
         changed = get_session_event(session_id)
         last_keepalive = time.monotonic()
-        while True:
-            if await request.is_disconnected():
-                break
-            s = await _owned_session(session_id, current_user["id"])
-            logs = s.get("logs", [])
-            while sent_count < len(logs):
-                yield f"data: {json.dumps({'type': 'log', 'message': logs[sent_count]}, ensure_ascii=False)}\n\n"
-                sent_count += 1
-                await asyncio.sleep(0.05)
+        pubsub = None
+        redis_client = None
+        if settings.REDIS_URL:
+            try:
+                import redis.asyncio as aioredis
 
-            if s["status"] in ("completed", "failed", "cancelled"):
-                yield f"data: {json.dumps({'type': 'done', 'status': s['status'], 'findings_count': len(s.get('findings', []))}, ensure_ascii=False)}\n\n"
-                break
+                redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+                pubsub = redis_client.pubsub()
+                await pubsub.subscribe(f"sec-llm:session:{session_id}")
+            except Exception:
+                pubsub = None
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                s = await _owned_session(session_id, current_user["id"])
+                logs = s.get("logs", [])
+                while sent_count < len(logs):
+                    yield f"data: {json.dumps({'type': 'log', 'message': logs[sent_count]}, ensure_ascii=False)}\n\n"
+                    sent_count += 1
+                    await asyncio.sleep(0.05)
 
-            if changed:
-                changed.clear()
+                if s["status"] in ("completed", "failed", "cancelled"):
+                    yield f"data: {json.dumps({'type': 'done', 'status': s['status'], 'findings_count': len(s.get('findings', []))}, ensure_ascii=False)}\n\n"
+                    break
+
+                if pubsub is not None:
+                    # Cross-worker wake-up; a timeout just re-reads the session.
+                    try:
+                        await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    except Exception:
+                        await asyncio.sleep(1)
+                elif changed:
+                    changed.clear()
+                    try:
+                        await asyncio.wait_for(changed.wait(), timeout=1)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(1)
+                if time.monotonic() - last_keepalive >= 15:
+                    yield ": keepalive\n\n"
+                    last_keepalive = time.monotonic()
+        finally:
+            if pubsub is not None:
                 try:
-                    await asyncio.wait_for(changed.wait(), timeout=1)
-                except asyncio.TimeoutError:
+                    await pubsub.unsubscribe(f"sec-llm:session:{session_id}")
+                    await pubsub.close()
+                except Exception:
                     pass
-            else:
-                await asyncio.sleep(1)
-            if time.monotonic() - last_keepalive >= 15:
-                yield ": keepalive\n\n"
-                last_keepalive = time.monotonic()
+            if redis_client is not None:
+                try:
+                    await redis_client.aclose()
+                except Exception:
+                    pass
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -257,6 +308,41 @@ async def get_agent_diff(
     return {"session_id": session_id, "baseline_session_id": previous_row["id"], **result}
 
 
+@router.get("/{session_id}/graph")
+async def get_agent_graph(
+    session_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user_or_skill),
+    db=Depends(get_db),
+):
+    """把本会话的组件类发现投影成节点/边，供前端画关联图。
+
+    只读 ``agent_sessions.findings``：不重跑匹配，保证图和报告是同一份数据。
+    没有组件类发现时返回空图带 reason，不返回 404——"没查到"和"服务坏了"要能区分。
+    """
+    from core.kg.graph import build_graph
+
+    session = await _owned_session(session_id, current_user["id"])
+    findings = session.get("findings") or []
+    if isinstance(findings, str):
+        try:
+            findings = json.loads(findings)
+        except ValueError:
+            findings = []
+
+    snapshot = ""
+    try:
+        from core.kg.store import KnowledgeBase
+
+        snapshot = str(KnowledgeBase().meta().get("snapshot_date") or "")
+    except Exception:  # noqa: BLE001 —— 快照元数据缺失不该让图接口整体失败
+        snapshot = ""
+
+    graph = build_graph(findings, session_id=session_id, snapshot=snapshot)
+    graph["status"] = session["status"]
+    return graph
+
+
 @router.delete("/{session_id}")
 async def cancel_agent_task(
     session_id: str,
@@ -264,6 +350,7 @@ async def cancel_agent_task(
     db=Depends(get_db),
 ):
     """Cancel an Agent task running in this worker."""
+    require_write(current_user)
     session = await _owned_session(session_id, current_user["id"])
     if session["status"] != "running":
         raise HTTPException(status_code=409, detail="Task is not running")

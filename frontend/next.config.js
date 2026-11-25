@@ -1,15 +1,19 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Emit .next/standalone so the Docker image can ship without node_modules.
+  output: 'standalone',
   reactStrictMode: true,
   images: {
     unoptimized: false,
   },
-  // 配置 API 代理（如果需要）
+  // Same-origin /api calls are proxied to the backend. In Docker this must point
+  // at the compose service name; locally the fallback is fine.
   async rewrites() {
+    const apiBase = process.env.API_INTERNAL_URL || 'http://localhost:8000';
     return [
       {
         source: '/api/:path*',
-        destination: 'http://localhost:8000/api/:path*',
+        destination: `${apiBase}/api/:path*`,
       },
     ];
   },

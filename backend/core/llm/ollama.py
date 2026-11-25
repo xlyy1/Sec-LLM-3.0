@@ -6,6 +6,7 @@ import httpx
 
 from config import settings
 from core.llm.base import LLMProvider
+from core.llm.usage import record_usage
 
 
 class OllamaProvider(LLMProvider):
@@ -35,7 +36,13 @@ class OllamaProvider(LLMProvider):
         ) as client:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)
             resp.raise_for_status()
-            return resp.json()["message"]["content"]
+            body = resp.json()
+            record_usage(
+                self.model_name,
+                body.get("prompt_eval_count", 0),
+                body.get("eval_count", 0),
+            )
+            return body["message"]["content"]
 
     async def stream(
         self,
@@ -48,6 +55,7 @@ class OllamaProvider(LLMProvider):
             "stream": True,
             "options": {"temperature": temperature},
         }
+        recorded = False
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(120.0, connect=10.0)
@@ -61,6 +69,13 @@ class OllamaProvider(LLMProvider):
                         continue
                     try:
                         chunk = json.loads(line)
+                        if chunk.get("done") and not recorded:
+                            record_usage(
+                                self.model_name,
+                                chunk.get("prompt_eval_count", 0),
+                                chunk.get("eval_count", 0),
+                            )
+                            recorded = True
                         content = chunk.get("message", {}).get("content", "")
                         if content:
                             yield content

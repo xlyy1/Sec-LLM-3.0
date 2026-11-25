@@ -11,6 +11,42 @@ export interface AgentSession {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+export type GraphNodeType = "asset" | "service" | "cpe" | "cve" | "cwe" | "fix";
+
+export interface GraphNode {
+  id: string;
+  type: GraphNodeType;
+  label: string;
+  attrs: Record<string, unknown>;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  rel: string;
+  source_of_truth: string;
+  confidence: number;
+  snapshot?: string;
+  note?: string;
+}
+
+export interface AgentGraph {
+  session_id: string;
+  snapshot: string;
+  status?: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  summary: {
+    nodes: number;
+    edges: number;
+    cves: number;
+    verified: number;
+    inference_only: number;
+  };
+  reason: string | null;
+  disclaimer: string;
+}
+
 export class AgentApiError extends Error {
   status: number;
   constructor(label: string, response: Response) {
@@ -98,6 +134,15 @@ export async function listAgentSessions(): Promise<{
 }> {
   const resp = await fetch(`${API_BASE}/api/agent/sessions`, { headers: authHeaders() });
   if (!resp.ok) throw new AgentApiError("Session list failed", resp);
+  return resp.json();
+}
+
+/** Get the asset → CVE graph projected from this session's findings */
+export async function getAgentGraph(sessionId: string): Promise<AgentGraph> {
+  const resp = await fetch(`${API_BASE}/api/agent/${sessionId}/graph`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) throw new AgentApiError("Graph fetch failed", resp);
   return resp.json();
 }
 

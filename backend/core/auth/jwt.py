@@ -1,4 +1,5 @@
 """JWT token creation and user extraction."""
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -21,11 +22,21 @@ def create_access_token(
     token_type: str = "access",
 ) -> str:
     to_encode = data.copy()
+    now = datetime.now(timezone.utc)
     if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = now + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire, "typ": token_type})
+        expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    # jti/iat let logout and "revoke all sessions" invalidate live access tokens
+    # instead of waiting for the 15 minute expiry.
+    to_encode.update(
+        {
+            "exp": expire,
+            "iat": now.timestamp(),
+            "jti": secrets.token_hex(16),
+            "typ": token_type,
+        }
+    )
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -48,6 +59,14 @@ async def get_current_user(
             return None
     except JWTError:
         return None
+
+    from core import state
+
+    if state.access_token_revoked(
+        payload.get("jti"), payload.get("uid"), payload.get("iat")
+    ):
+        return None
+
     if db is None:
         return None
     with db.cursor() as cursor:

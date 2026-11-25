@@ -75,7 +75,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7.1.0
         with:
-          python-version: "3.10"
+          python-version: "3.12"
       - name: Install CPU smoke dependencies
         run: python -m pip install pytest langchain-core pydantic-settings
       - name: Run retrieval regression tests
@@ -97,7 +97,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7.1.0
         with:
-          python-version: "3.10"
+          python-version: "3.12"
       - name: Install scanner
         run: python -m pip install bandit==1.9.4
       - name: Scan backend code

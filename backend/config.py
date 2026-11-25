@@ -10,7 +10,10 @@ class Settings(BaseSettings):
     # Base
     ENV_MODE: str = "dev"
     JWT_SECRET_KEY: str = "default-unsafe-secret-key"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # Secure cookies require HTTPS; set true behind TLS in production.
+    REFRESH_COOKIE_SECURE: bool = False
     INITIAL_ADMIN_PASSWORD: Optional[str] = None
     # Comma-separated exact origins; never "*" together with credentials.
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
@@ -19,6 +22,14 @@ class Settings(BaseSettings):
     LOGIN_FAILURE_WINDOW_SECONDS: int = 300
     # Minimum local-part length for self-service registration (admin stays at 12).
     USER_PASSWORD_MIN_LENGTH: int = 10
+    # Per-user daily request quotas (0 = unlimited). Counted per UTC day.
+    DAILY_AGENT_QUOTA: int = 100
+    DAILY_CHAT_QUOTA: int = 1000
+    # Per-user daily token budget (0 = unlimited); enforced before a new LLM call.
+    DAILY_TOKEN_BUDGET: int = 0
+    # Optional USD estimates for dashboards (0 = hide cost).
+    LLM_COST_PER_1K_PROMPT: float = 0.0
+    LLM_COST_PER_1K_COMPLETION: float = 0.0
     # Uploads: hard cap before anything is written or parsed.
     MAX_UPLOAD_BYTES: int = 20 * 1024 * 1024
     UPLOAD_ALLOWED_EXTENSIONS: str = "pdf,txt,log,json,csv,md"
@@ -55,6 +66,9 @@ class Settings(BaseSettings):
     MYSQL_PORT: int = 3306
     MYSQL_DB: str = "sec_llm_db"
 
+    # Shared runtime state (login throttling). Empty = in-process fallback.
+    REDIS_URL: str = ""
+
     # Mail (optional)
     MAIL_USERNAME: Optional[str] = None
     MAIL_PASSWORD: Optional[str] = None
@@ -86,6 +100,8 @@ class Settings(BaseSettings):
     AGENT_ENFORCE_TARGET_TOOL_MATCH: bool = True
     AGENT_TASK_TIMEOUT_SECONDS: int = 1800
     AGENT_MAX_CONCURRENT: int = 4
+    # How long a shutdown may wait for in-flight Agent tasks before cancelling.
+    AGENT_SHUTDOWN_GRACE_SECONDS: int = 30
     AGENT_BROWSER_HEADLESS: bool = True
     AGENT_DEFAULT_SCAN_MODE: str = "standard"  # standard | deep | quick
     AGENT_ALLOWED_TARGETS: str = ""  # comma-separated exact hostnames/IPs; required for production web scans
@@ -110,6 +126,9 @@ class Settings(BaseSettings):
     AGENT_SESSION_TTL_SECONDS: int = 1800
     # Reproducible evidence artifacts (request/response + PoC) per session.
     AGENT_EVIDENCE_DIR: str = "artifacts/evidence"
+    # Offline NVD snapshot for cve_match; empty = backend/data/kg.db.
+    AGENT_KG_DB_PATH: str = ""
+    AGENT_KG_TOP_N: int = 5
     # Auto-fix PR helper stays disabled and is never exposed to the planner.
     AGENT_AUTOFIX_ENABLED: bool = False
     AGENT_POLICY_PATH: Optional[str] = None  # default: data/agent_optimization/active.json

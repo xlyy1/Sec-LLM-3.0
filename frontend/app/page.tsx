@@ -32,7 +32,7 @@ import {
   Wrench,
   Activity,
 } from 'lucide-react';
-import { getDashboardStats, getLogRecords, type AnalysisResult, type LogRecord, type SecurityScore, type UserInfo } from '@/lib/api';
+import api, { getDashboardStats, getLogRecords, type AnalysisResult, type LogRecord, type SecurityScore, type UserInfo } from '@/lib/api';
 import LLMProviderToggle from '@/components/LLMProviderToggle';
 import {
   AreaChart,
@@ -189,6 +189,15 @@ export default function Dashboard() {
   const [logRecordsError, setLogRecordsError] = useState<string | null>(null);
   const [hasHighUnresolved, setHasHighUnresolved] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [usageToday, setUsageToday] = useState<{
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    requests: number;
+    estimated_cost_usd: number;
+    budget: number;
+    remaining: number | null;
+  } | null>(null);
   const [searchResults, setSearchResults] = useState<SearchItem[]>([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(-1);
@@ -318,6 +327,14 @@ export default function Dashboard() {
     }, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // 今日 LLM 用量（失败不影响主面板）
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    api.get('/api/usage/today')
+      .then((response) => setUsageToday(response.data))
+      .catch(() => setUsageToday(null));
+  }, [isAuthenticated]);
 
   // 系统状态：只动画后端真实返回的 CPU 负载；其余指标未接入，保持"—"
   useEffect(() => {
@@ -1045,6 +1062,31 @@ export default function Dashboard() {
                   <p className="text-xs text-gray-500">{securityScoreDetail?.reason || '暂无数据'}</p>
                 )}
               </div>
+            </div>
+          </div>
+
+          {/* 今日 LLM 用量 */}
+          <div className="bg-slate-900/50 backdrop-blur border border-white/5 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Cpu className="w-6 h-6 text-cyan-400" />
+              <div>
+                <p className="text-sm text-gray-400">今日 LLM Token</p>
+                <p className="text-2xl font-bold text-white">
+                  {usageToday ? usageToday.total_tokens.toLocaleString() : '—'}
+                </p>
+              </div>
+            </div>
+            <div className="text-sm text-gray-400">
+              prompt {usageToday?.prompt_tokens.toLocaleString() ?? '—'} / completion{' '}
+              {usageToday?.completion_tokens.toLocaleString() ?? '—'} / 请求 {usageToday?.requests ?? '—'}
+            </div>
+            <div className="text-sm text-gray-400">
+              估算成本 ${usageToday?.estimated_cost_usd?.toFixed(4) ?? '0.0000'}
+            </div>
+            <div className="text-sm text-gray-400">
+              {usageToday && usageToday.budget > 0
+                ? `预算 ${usageToday.budget.toLocaleString()}，剩余 ${usageToday.remaining?.toLocaleString() ?? 0}`
+                : '预算未设置'}
             </div>
           </div>
 

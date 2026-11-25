@@ -1,0 +1,3 @@
+# Optional local ML stack: enables the bundled BGE embedding/reranker models.
+# Without it the API uses Ollama embeddings (nomic-embed-text) and skips reranking.
+sentence-transformers>=3.0.0

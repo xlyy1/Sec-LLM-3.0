@@ -28,6 +28,7 @@ import {
   deleteLogRecord,
   updateLogRecordStatus,
   uploadLogFile,
+  logout,
   type AnalysisResult,
   type LogRecord,
   type UserInfo,
@@ -124,6 +125,7 @@ export default function LogAnalysisPage() {
   }, [analysisResult, fileName]);
 
   const handleLogout = () => {
+    void logout();
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     setShowUserMenu(false);

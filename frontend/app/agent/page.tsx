@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Shield, Activity } from "lucide-react";
 import AgentTaskPanel from "@/components/AgentTaskPanel";
 import AgentLogStream from "@/components/AgentLogStream";
+import AssetCveGraph from "@/components/AssetCveGraph";
 import { createAgentStream, getAgentReport, getAgentStatus, listAgentSessions } from "@/lib/agent-api";
 
 export default function AgentPage() {
@@ -196,6 +197,8 @@ export default function AgentPage() {
               </div>
             </div>
           )}
+
+          {sessionId && <AssetCveGraph sessionId={sessionId} refreshKey={status} />}
         </div>
       </main>
     </div>

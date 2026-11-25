@@ -29,7 +29,7 @@ def annotate_finding(finding: dict, tool: str, result: dict, evidence: dict | No
         **finding,
         "source_tool": tool,
         "verification_status": "unverified",
-        "verification_reason": "No independently replayable artifact",
+        "verification_reason": finding.get("verification_reason") or "No independently replayable artifact",
     }
     payload = finding.get("evidence")
     match = observed_result(result, payload)
@@ -142,6 +142,14 @@ def calculate_cvss(
 
 def enhance_finding(finding: dict) -> dict:
     """Add CVSS + OWASP classification to a finding."""
+    if finding.get("cvss_source") == "nvd":
+        # NVD 的分数与 CWE 是权威数据。这里原本无条件用严重级反推一个 CVSS，
+        # 会把 CVE 的真实评分覆盖成编造值，而且不会报任何错。
+        if not finding.get("owasp_category"):
+            owasp, _cwe = classify_owasp(finding.get("title", ""), finding.get("description", ""))
+            finding["owasp_category"] = owasp
+        return finding
+
     severity_map = {"Critical": ("N", "L", "N", "H", "H", "H"),
                     "High": ("N", "L", "N", "H", "H", "N"),
                     "Medium": ("N", "L", "L", "H", "L", "N"),

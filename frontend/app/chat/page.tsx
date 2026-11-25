@@ -27,6 +27,7 @@ import {
   getKnowledgeFiles,
   updateChatHistory,
   uploadFile,
+  logout,
   type ChatHistory,
   type ChatHistoryMessage,
   type KnowledgeFile,
@@ -119,6 +120,7 @@ export default function ChatPage() {
   }, [messages]);
 
   const handleLogout = useCallback(() => {
+    void logout();
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     setShowUserMenu(false);

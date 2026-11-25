@@ -4,6 +4,8 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
+  // Refresh token is an httpOnly cookie scoped to /api/auth.
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -19,6 +21,43 @@ api.interceptors.request.use((config) => {
   }
   return config;
 });
+
+// One refresh at a time; concurrent 401s wait for the same rotation.
+let refreshPromise: Promise<string | null> | null = null;
+
+api.interceptors.response.use(
+  (response) => response,
+  async (error: any) => {
+    const original: any = error.config;
+    const status = error.response?.status;
+    if (status !== 401 || !original || original._retry) return Promise.reject(error);
+    if (typeof original.url === 'string' &&
+        (original.url.includes('/api/auth/refresh') || original.url.includes('/api/login'))) {
+      return Promise.reject(error);
+    }
+    original._retry = true;
+    try {
+      if (!refreshPromise) {
+        refreshPromise = axios
+          .post(`${API_BASE_URL}/api/auth/refresh`, {}, { withCredentials: true })
+          .then((res) => {
+            const token = res.data?.access_token as string | undefined;
+            if (token) localStorage.setItem('token', token);
+            return token || null;
+          })
+          .finally(() => { refreshPromise = null; });
+      }
+      const token = await refreshPromise;
+      if (!token) return Promise.reject(error);
+      original.headers = original.headers || {};
+      original.headers.Authorization = `Bearer ${token}`;
+      return api(original);
+    } catch (refreshError) {
+      localStorage.removeItem('token');
+      return Promise.reject(error);
+    }
+  }
+);
 
 export interface LoginRequest {
   username: string;
@@ -44,6 +83,8 @@ export interface AuthResponse {
   access_token: string;
   token_type: string;
   user: UserInfo;
+  refresh_token?: string;
+  expires_in?: number;
 }
 
 export interface RegisterResponse {
@@ -60,6 +101,17 @@ export interface LoginResponse {
 export const login = async (credentials: LoginRequest): Promise<AuthResponse> => {
   const response = await api.post<AuthResponse>('/api/login', credentials);
   return response.data;
+};
+
+/** Revoke the refresh-token family and clear the local access token. */
+export const logout = async (): Promise<void> => {
+  try {
+    await api.post('/api/auth/logout', {});
+  } catch {
+    // Network failures must not trap the user in the app.
+  } finally {
+    if (typeof window !== 'undefined') localStorage.removeItem('token');
+  }
 };
 
 export const register = async (data: RegisterRequest): Promise<RegisterResponse> => {

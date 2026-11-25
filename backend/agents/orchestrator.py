@@ -21,6 +21,7 @@ from core.safety.scope import ScopeError, build_scope
 from dataclasses import asdict
 from agents.supervisor import run_multi_agent
 from config import settings
+from core import state as shared_state
 from core.llm.router import single_shot_completion
 from tools.registry import get_all_tools, get_tool, invoke_tool
 
@@ -37,6 +38,7 @@ import tools.sqli           # noqa: E402
 import tools.lfi            # noqa: E402
 import tools.ssrf           # noqa: E402
 import tools.api_discovery  # noqa: E402
+import tools.cve_match       # noqa: E402
 
 # Live cache; MySQL keeps the recoverable session record.
 _sessions: Dict[str, Dict[str, Any]] = {}
@@ -262,6 +264,8 @@ async def _store_progress(session_id: str, state: Dict[str, Any]) -> None:
         session["_synced_at"] = time.monotonic()
     await asyncio.to_thread(_persist_session, session_id)
     _session_events.setdefault(session_id, asyncio.Event()).set()
+    # Cross-worker SSE wake-up; a no-op when Redis is not configured.
+    await asyncio.to_thread(shared_state.publish_session_event, session_id)
 
 
 def get_session_event(session_id: str) -> asyncio.Event | None:
@@ -890,6 +894,14 @@ async def _execute_agent(session_id: str, task: AgentTask) -> None:
 
 
 
+async def _execute_with_usage(session_id: str, task: AgentTask, user_id) -> None:
+    """Run the graph while attributing every LLM call to the session owner."""
+    from core.llm.usage import user_context
+
+    with user_context(user_id):
+        await _execute_agent(session_id, task)
+
+
 def _claim_session(session_id: str, recovered: bool = False) -> bool:
     """Atomically claim a queued session before invoking any tool."""
     with _db_connection() as conn:
@@ -926,8 +938,23 @@ async def _heartbeat_session(session_id: str, owner: asyncio.Task) -> None:
 
 async def _run_limited(session_id: str, task: AgentTask, recovered: bool = False) -> None:
     heartbeat = None
+    slot_acquired = False
     try:
         async with _agent_slots:
+            slot_acquired = await asyncio.to_thread(
+                shared_state.wait_for_agent_slot,
+                session_id,
+                settings.AGENT_MAX_CONCURRENT,
+                settings.AGENT_TASK_TIMEOUT_SECONDS + 120,
+                settings.AGENT_TASK_TIMEOUT_SECONDS,
+            )
+            if not slot_acquired:
+                current = _sessions.get(session_id) or {}
+                await _store_progress(session_id, {
+                    **(current.get("state") or {}), "phase": "busy", "status": "failed",
+                    "logs": (current.get("logs") or []) + ["[BUSY] No free Agent slot before timeout"],
+                })
+                return
             if not await asyncio.to_thread(_claim_session, session_id, recovered):
                 _sessions.pop(session_id, None)
                 _session_events.pop(session_id, None)
@@ -939,7 +966,10 @@ async def _run_limited(session_id: str, task: AgentTask, recovered: bool = False
                 "logs": current["logs"], "findings": current["findings"],
                 "report": current.get("report"),
             })
-            await asyncio.wait_for(_execute_agent(session_id, task), settings.AGENT_TASK_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                _execute_with_usage(session_id, task, current.get("user_id")),
+                settings.AGENT_TASK_TIMEOUT_SECONDS,
+            )
     except asyncio.TimeoutError:
         previous = _sessions[session_id].get("state") or {}
         await _store_progress(session_id, {
@@ -961,6 +991,8 @@ async def _run_limited(session_id: str, task: AgentTask, recovered: bool = False
                 await heartbeat
             except asyncio.CancelledError:
                 pass
+        if slot_acquired:
+            await asyncio.to_thread(shared_state.release_agent_slot, session_id)
         await asyncio.to_thread(_audit_scan, session_id, True)
 
 
@@ -1047,4 +1079,21 @@ async def recover_agent_sessions() -> int:
         task.add_done_callback(lambda completed, sid=session["id"]: _finish_background_task(sid, completed))
     if interrupted_count:
         print(f"[Agent] Marked {interrupted_count} interrupted sessions as failed")
+    return len(pending)
+
+
+async def drain_running_tasks(timeout_seconds: float = 30.0) -> int:
+    """Wait for in-flight Agent tasks, then cancel what is left.
+
+    Called from the FastAPI shutdown hook so a rolling restart does not abandon
+    mid-scan work. Cancelled tasks persist their final state through _run_limited.
+    """
+    tasks = [task for task in _running_tasks.values() if not task.done()]
+    if not tasks:
+        return 0
+    _done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
     return len(pending)

@@ -1,0 +1,136 @@
+name: sec-llm
+
+# One-command local stack: MySQL + FastAPI backend + Next.js frontend.
+# Copy .env.compose.example to .env to override the defaults below.
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-sec_llm_root_dev}
+      MYSQL_DATABASE: ${MYSQL_DB:-sec_llm_db}
+      MYSQL_USER: ${APP_DB_USER:-sec_llm}
+      MYSQL_PASSWORD: ${APP_DB_PASSWORD:-sec_llm_dev_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  backend:
+    build:
+      context: ./backend
+      args:
+        # 1 = include Chromium and its OS packages (needed by browser_* tools).
+        INSTALL_BROWSERS: ${INSTALL_BROWSERS:-0}
+        # 1 = include torch + sentence-transformers for the bundled BGE models.
+        INSTALL_LOCAL_ML: ${INSTALL_LOCAL_ML:-0}
+    image: sec-llm-backend:local
+    restart: unless-stopped
+    # Optional local overrides. Values below win over this file on purpose so the
+    # container always talks to the compose MySQL, not to localhost.
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DB: ${MYSQL_DB:-sec_llm_db}
+      MYSQL_USER: ${APP_DB_USER:-sec_llm}
+      MYSQL_PASSWORD: ${APP_DB_PASSWORD:-sec_llm_dev_password}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:-sec-llm-sandbox:latest}
+      # Shared login throttling; empty disables Redis and uses the in-process fallback.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Short-lived access token; refresh token rotation is handled by /api/auth.
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      # Per-user daily quotas (0 = unlimited).
+      DAILY_AGENT_QUOTA: ${DAILY_AGENT_QUOTA:-100}
+      DAILY_CHAT_QUOTA: ${DAILY_CHAT_QUOTA:-1000}
+      DAILY_TOKEN_BUDGET: ${DAILY_TOKEN_BUDGET:-0}
+      # First startup refuses to create the admin without a >=12 char password.
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-change-me-before-exposing}
+    stop_grace_period: 45s
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_data:/app/data
+      - backend_artifacts:/app/artifacts
+      - backend_temp:/app/temp
+      - backend_uploads:/app/uploads
+      # Optional local embedding/reranker models; can be empty (the app degrades).
+      - ./backend/models:/app/models:ro
+      # Lets shell_exec / browser tools drive the host Docker daemon (agent sandbox).
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        API_INTERNAL_URL: http://backend:8000
+    image: sec-llm-frontend:local
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Build the security-tool sandbox image on demand:
+  #   docker compose --profile sandbox build sandbox
+  sandbox:
+    image: ${AGENT_SANDBOX_IMAGE:-sec-llm-sandbox:latest}
+    build:
+      context: ./sandbox
+    profiles: ["sandbox"]
+    command: ["true"]
+
+volumes:
+  mysql_data:
+  redis_data:
+  backend_data:
+  backend_artifacts:
+  backend_temp:
+  backend_uploads:

@@ -25,7 +25,9 @@ langchain-ollama>=1.0.1
 langchain-chroma>=1.1.0
 langchain-text-splitters>=1.1.0
 chromadb>=1.4.1
-sentence-transformers>=3.0.0
+# Local embedding/reranker models need the optional ML extras:
+#   pip install -r requirements-ml.txt
+# The API falls back to Ollama embeddings when they are absent.
 pypdf>=6.6.2
 python-multipart>=0.0.22
 openai>=2.16.0
@@ -34,6 +36,8 @@ passlib[bcrypt]>=1.7.4
 python-jose[cryptography]>=3.3.0
 bcrypt==4.0.1
 pymysql>=1.1.0
+# Shared login throttling across workers (optional at runtime)
+redis>=5,<8
 fastapi-mail>=1.5.8
 email-validator>=2.3.0
 # Agent platform dependencies
@@ -51,3 +55,6 @@ SQLAlchemy>=2.0,<3
 
 # Real host metrics for the dashboard (optional at runtime, installed by default)
 psutil>=5.9,<8
+
+# Prometheus metrics for /metrics
+prometheus-client>=0.20,<1

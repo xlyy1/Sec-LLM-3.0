@@ -74,7 +74,10 @@ def get_embeddings() -> Embeddings:
     """生产入口：优先中文 bge，缺失时回退 Ollama（带前缀）。"""
     path = zh_model_path()
     if path is not None:
-        return LocalBGEEmbeddings(path)
+        try:
+            return LocalBGEEmbeddings(path)
+        except Exception as error:  # noqa: BLE001 —— 缺 sentence-transformers 时不应阻止启动
+            print(f"[RAG] 本地嵌入模型不可用（{error}），回退到 Ollama")
     return PrefixedOllamaEmbeddings()
 
 
