@@ -29,6 +29,7 @@ chromadb>=1.4.1
 #   pip install -r requirements-ml.txt
 # The API falls back to Ollama embeddings when they are absent.
 pypdf>=6.6.2
+defusedxml>=0.7,<1
 python-multipart>=0.0.22
 openai>=2.16.0
 httpx>=0.25.2

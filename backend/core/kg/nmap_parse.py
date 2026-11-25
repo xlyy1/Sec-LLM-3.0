@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
+from defusedxml.ElementTree import ParseError, fromstring
 from typing import Any, Dict
 
 from core.kg.cpe import service_to_cpe, to_cpe23
@@ -66,8 +66,8 @@ def parse_nmap_xml(xml_text: str) -> Dict[str, Any]:
         return result
 
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as error:
+        root = fromstring(xml_text)
+    except ParseError as error:
         result["error"] = f"invalid xml: {error}"
         return result
     if root.tag != "nmaprun":

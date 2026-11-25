@@ -65,7 +65,7 @@ jobs:
       - name: Build backend image
         run: docker build -t sec-llm-backend:ci ./backend
       - name: Trivy image scan (HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: sec-llm-backend:ci
           format: sarif
