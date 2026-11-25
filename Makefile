@@ -18,7 +18,8 @@ config:
 	$(COMPOSE) config
 
 smoke:
-	curl -fsS http://localhost:8000/ >/dev/null && echo "backend OK"
+	curl -fsS http://localhost:8000/healthz >/dev/null && echo "backend healthz OK"
+	curl -fsS http://localhost:8000/readyz >/dev/null && echo "backend readyz OK"
 	curl -fsS http://localhost:3000/ >/dev/null && echo "frontend OK"
 
 sandbox:

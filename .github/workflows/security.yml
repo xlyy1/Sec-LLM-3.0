@@ -79,3 +79,20 @@ jobs:
         with:
           sarif_file: trivy-backend.sarif
           category: trivy-backend
+      - name: Build sandbox runner image
+        run: docker build -t sec-llm-sandbox-runner:ci ./sandbox/runner
+      - name: Trivy sandbox runner scan (HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: sec-llm-sandbox-runner:ci
+          format: sarif
+          output: trivy-runner.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+      - name: Upload sandbox runner SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-runner.sarif
+          category: trivy-runner
