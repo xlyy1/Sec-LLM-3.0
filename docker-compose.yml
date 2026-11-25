@@ -69,6 +69,8 @@ services:
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:-sec-llm-sandbox:latest}
       # Shared login throttling; empty disables Redis and uses the in-process fallback.
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SANDBOX_RUNNER_URL: http://sandbox-runner:8090
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-dev-runner-token-change-me}
       # Short-lived access token; refresh token rotation is handled by /api/auth.
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
       REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
@@ -88,12 +90,14 @@ services:
       - backend_uploads:/app/uploads
       # Optional local embedding/reranker models; can be empty (the app degrades).
       - ./backend/models:/app/models:ro
-      # Lets shell_exec / browser tools drive the host Docker daemon (agent sandbox).
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Docker socket is intentionally NOT mounted here: shell_exec calls the
+      # sandbox-runner service below, which owns the socket.
     depends_on:
       mysql:
         condition: service_healthy
       redis:
+        condition: service_started
+      sandbox-runner:
         condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
@@ -103,6 +107,36 @@ services:
       start_period: 60s
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # Narrow executor: the only service with the Docker socket. The API reaches it
+  # over HTTP with a shared token and can only request allowlisted tools.
+  sandbox-runner:
+    build:
+      context: ./sandbox/runner
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    image: sec-llm-sandbox-runner:local
+    restart: unless-stopped
+    environment:
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-dev-runner-token-change-me}
+      SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:-sec-llm-sandbox:latest}
+      # Small, bounded concurrency; the API has its own Agent slot limit.
+      SANDBOX_RUNNER_CONCURRENCY: ${SANDBOX_RUNNER_CONCURRENCY:-4}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   frontend:
     build:

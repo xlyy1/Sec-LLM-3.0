@@ -127,6 +127,7 @@ sec-llm-4.0/
 │   └── tui.py               # Textual TUI
 ├── sandbox/
 │   ├── Dockerfile           # 隔离安全工具容器
+│   ├── runner/              # 唯一持有 Docker socket 的窄执行器
 │   └── rsi/Dockerfile       # RSI 测试 / 完整模型运行镜像
 ├── docs/                    # RAG、Agent、代码级 RSI 操作与验收记录
 └── openclaw-skill/          # OpenClaw 集成
@@ -165,7 +166,8 @@ docker compose up -d --build --wait
 - MySQL 数据在 `mysql_data` 卷；Agent 数据、证据、临时文件分别在 `backend_data`、`backend_artifacts`、`backend_temp`、`backend_uploads` 卷。
 - Redis 承载跨 Worker 的登录失败计数（`REDIS_URL`，默认 `redis://redis:6379/0`）；留空时退回进程内计数，单副本仍可运行。
 - `backend/models` 以只读方式挂载到容器；没有本地模型时会回退到 Ollama（`OLLAMA_BASE_URL`，Docker Desktop 默认走 `host.docker.internal:11434`）。
-- 安全工具容器复用本机 Docker：先 `docker compose --profile sandbox build sandbox`，`shell_exec` 等工具才能启动 `sec-llm-sandbox` 镜像。
+- **沙箱隔离**：backend 容器**不挂载** `docker.sock`；`sandbox-runner` 是唯一持有 socket 的服务，只接受 allowlist 工具 + argv（拒绝 `--privileged/--volume/--mount/--network` 等），固定 `cap-drop ALL / read-only / no-new-privileges / 512MB / 1 CPU`，网络工具用 bridge、离线工具用 none。API 通过带 token 的 HTTP 调用它。
+- 安全工具镜像需先构建：`docker compose --profile sandbox build sandbox`。
 - 构建阶段需要代理时，把代理传给 BuildKit（不会写进镜像）：
   `docker compose build --build-arg HTTPS_PROXY=http://host.docker.internal:7897 --build-arg HTTP_PROXY=http://host.docker.internal:7897`
 - 受限网络：如果 `docker pull` 超时但容器能访问宿主机代理，先把 Docker Desktop 的代理改为 `http://host.docker.internal:<端口>`（`127.0.0.1` 在 Docker 虚拟机里指向它自己）；仍不可用时，在有网机器上 `docker save` 基础镜像，再 `docker load` 导入。

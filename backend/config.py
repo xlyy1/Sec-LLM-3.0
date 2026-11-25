@@ -83,6 +83,9 @@ class Settings(BaseSettings):
 
     # Agent platform settings (NEW)
     AGENT_SANDBOX_IMAGE: str = "sec-llm-sandbox:latest"
+    # Narrow HTTP executor that is the only component with the Docker socket.
+    SANDBOX_RUNNER_URL: str = ""
+    SANDBOX_RUNNER_TOKEN: str = ""
     AGENT_MAX_STEPS: int = 20
     AGENT_STEP_TIMEOUT_SECONDS: int = 300
     # 规划校验失败时的重试次数（0 表示不重试）

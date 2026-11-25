@@ -61,6 +61,33 @@ async def shell_exec(command: str, timeout: int = 300) -> dict:
     tool_name = args[0]
     needs_network = tool_name in {"nmap", "sqlmap", "nuclei", "ffuf", "nikto", "whatweb"}
 
+    # Preferred path: the API has no Docker socket; a narrow runner owns it.
+    runner_url = (getattr(settings, "SANDBOX_RUNNER_URL", "") or "").rstrip("/")
+    if runner_url:
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=effective_timeout + 15) as client:
+                response = await client.post(
+                    f"{runner_url}/run",
+                    json={"tool": tool_name, "args": args[1:], "timeout": effective_timeout},
+                    headers={"X-Runner-Token": settings.SANDBOX_RUNNER_TOKEN},
+                )
+        except Exception as error:  # noqa: BLE001
+            return {"stdout": "", "stderr": f"Sandbox runner unavailable: {error}"[:1000], "exit_code": -1}
+        if response.status_code != 200:
+            return {
+                "stdout": "",
+                "stderr": f"Sandbox runner rejected the command ({response.status_code}): {response.text[:500]}",
+                "exit_code": -1,
+            }
+        data = response.json()
+        return {
+            "stdout": str(data.get("stdout", ""))[:50000],
+            "stderr": str(data.get("stderr", ""))[:10000],
+            "exit_code": int(data.get("exit_code", -1)),
+        }
+
     cmd = [
         "docker", "run", "--rm",
         "--name", container_name,
